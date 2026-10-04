@@ -1,0 +1,82 @@
+services:
+  node1:
+    build:
+      context: .
+      target: runtime
+    image: gos3:verify
+    command:
+      - server
+      - -address
+      - ":9000"
+      - -grpc-address
+      - ":9001"
+      - -advertise
+      - node1:9001
+      - -peers
+      - node2:9001
+      - /data/d1
+      - /data/d2
+    environment:
+      GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
+      GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - node1-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+
+  node2:
+    build:
+      context: .
+      target: runtime
+    image: gos3:verify
+    command:
+      - server
+      - -address
+      - ":9000"
+      - -grpc-address
+      - ":9001"
+      - -advertise
+      - node2:9001
+      - -peers
+      - node1:9001
+      - /data/d1
+      - /data/d2
+    environment:
+      GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
+      GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - node2-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+
+  verify:
+    build:
+      context: .
+      target: verify
+    image: gos3-verify:local
+    entrypoint: ["/bin/bash", "/scripts/verify-cluster.sh"]
+    depends_on:
+      node1:
+        condition: service_healthy
+      node2:
+        condition: service_healthy
+    environment:
+      S3_ENDPOINT: http://node1:9000
+      S3_USER: ${GOS3_ROOT_USER:-minioadmin}
+      S3_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+      PHASE: ${PHASE:-write}
+    volumes:
+      - ./scripts/verify-cluster.sh:/scripts/verify-cluster.sh:ro
+    restart: "no"
+
+volumes:
+  node1-data:
+  node2-data:

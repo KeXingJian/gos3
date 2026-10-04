@@ -526,12 +526,18 @@ func (f *FS) ListObjects(ctx context.Context, bucket string, opts ListOptions) (
 	if err != nil {
 		return ListObjectsResult{}, err
 	}
+	return buildObjectsResult(metas, bucket, opts), nil
+}
+
+type listObjectItem struct {
+	key  string
+	info ObjectInfo
+}
+
+func buildObjectsResult(metas []objectMetaEntry, bucket string, opts ListOptions) ListObjectsResult {
 	var items []listObjectItem
 	for _, entry := range metas {
-		if !strings.HasPrefix(entry.key, opts.Prefix) {
-			continue
-		}
-		if len(entry.meta.Versions) == 0 {
+		if !strings.HasPrefix(entry.key, opts.Prefix) || len(entry.meta.Versions) == 0 {
 			continue
 		}
 		latest := entry.meta.Versions[0]
@@ -540,12 +546,7 @@ func (f *FS) ListObjects(ctx context.Context, bucket string, opts ListOptions) (
 		}
 		items = append(items, listObjectItem{key: entry.key, info: latest.toInfo(bucket, entry.key)})
 	}
-	return paginateObjects(items, opts), nil
-}
-
-type listObjectItem struct {
-	key  string
-	info ObjectInfo
+	return paginateObjects(items, opts)
 }
 
 func paginateObjects(items []listObjectItem, opts ListOptions) ListObjectsResult {
@@ -618,6 +619,10 @@ func (f *FS) ListObjectVersions(ctx context.Context, bucket string, opts ListOpt
 	if err != nil {
 		return ListVersionsResult{}, err
 	}
+	return buildVersionsResult(metas, bucket, opts), nil
+}
+
+func buildVersionsResult(metas []objectMetaEntry, bucket string, opts ListOptions) ListVersionsResult {
 	max := normalizeMaxKeys(opts.MaxKeys)
 	var result ListVersionsResult
 	seenPrefix := make(map[string]struct{})
@@ -668,7 +673,7 @@ func (f *FS) ListObjectVersions(ctx context.Context, bucket string, opts ListOpt
 			break
 		}
 	}
-	return result, nil
+	return result
 }
 
 func (f *FS) NewMultipartUpload(ctx context.Context, bucket, object, contentType string, userMeta map[string]string) (string, error) {

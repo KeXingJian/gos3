@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 
 FROM golang:1.24-alpine AS builder
+ENV GOPROXY=https://proxy.golang.org|https://goproxy.cn|direct
+ENV GOSUMDB=off
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

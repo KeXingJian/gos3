@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kxj/gos3/internal/auth"
+	"github.com/kxj/gos3/internal/cluster"
 	"github.com/kxj/gos3/internal/config"
+	"github.com/kxj/gos3/internal/disk"
 	"github.com/kxj/gos3/internal/server"
 	"github.com/kxj/gos3/internal/store"
 	"github.com/kxj/gos3/internal/version"
@@ -36,6 +39,9 @@ SERVER FLAGS:
   -root-password   root secret key (env GOS3_ROOT_PASSWORD)
   -data-shards     erasure data shards (0 = auto)
   -parity-shards   erasure parity shards (0 = auto)
+  -grpc-address    internode gRPC listen address (default ":9001")
+  -advertise       gRPC address other nodes use to reach this node
+  -peers           comma-separated peer gRPC addresses (distributed mode)
 `
 
 func Main(args []string) int {
@@ -68,6 +74,9 @@ func runServer(args []string) int {
 	fs.StringVar(&cfg.RootPass, "root-password", cfg.RootPass, "root secret key")
 	fs.IntVar(&cfg.DataShards, "data-shards", 0, "erasure data shards (0 = auto)")
 	fs.IntVar(&cfg.ParityShards, "parity-shards", 0, "erasure parity shards (0 = auto)")
+	fs.StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "internode gRPC listen address")
+	fs.StringVar(&cfg.Advertise, "advertise", "", "gRPC address other nodes use to reach this node")
+	peersFlag := fs.String("peers", "", "comma-separated peer gRPC addresses")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -78,14 +87,16 @@ func runServer(args []string) int {
 	}
 	cfg.DataDirs = fs.Args()
 	cfg.DataDir = cfg.DataDirs[0]
+	cfg.Peers = splitPeers(*peersFlag)
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	st, err := newStore(cfg, logger)
+	st, stopStore, err := buildStore(cfg, logger)
 	if err != nil {
 		logger.Error("[gos3: store-init-failed]", "error", err.Error())
 		return 1
 	}
+	defer stopStore()
 	creds := auth.NewStore(auth.Credentials{AccessKey: cfg.RootUser, SecretKey: cfg.RootPass})
 	srv := server.New(cfg, st, creds, logger)
 
@@ -130,12 +141,61 @@ func runServer(args []string) int {
 	return 0
 }
 
-func newStore(cfg config.Config, logger *slog.Logger) (store.Store, error) {
-	total := len(cfg.DataDirs)
-	if total == 1 {
-		return store.NewFS(cfg.DataDirs[0], logger)
+func buildStore(cfg config.Config, logger *slog.Logger) (store.Store, func(), error) {
+	if len(cfg.Peers) == 0 {
+		if len(cfg.DataDirs) == 1 {
+			st, err := store.NewFS(cfg.DataDirs[0], logger)
+			return st, func() {}, err
+		}
+		dataShards, parityShards, err := layout(len(cfg.DataDirs), cfg.DataShards, cfg.ParityShards)
+		if err != nil {
+			return nil, nil, err
+		}
+		disks := make([]disk.Disk, len(cfg.DataDirs))
+		for i, dir := range cfg.DataDirs {
+			d, err := disk.NewLocal(fmt.Sprintf("local/%d", i), dir)
+			if err != nil {
+				return nil, nil, err
+			}
+			disks[i] = d
+		}
+		st, err := store.NewErasure(disks, dataShards, parityShards, logger)
+		return st, func() {}, err
 	}
-	dataShards, parityShards := cfg.DataShards, cfg.ParityShards
+
+	if cfg.Advertise == "" {
+		return nil, nil, errors.New("distributed mode requires -advertise")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cl, err := cluster.Build(ctx, cluster.Options{
+		Advertise:   cfg.Advertise,
+		Listen:      cfg.GRPCAddress,
+		LocalDirs:   cfg.DataDirs,
+		Peers:       cfg.Peers,
+		Logger:      logger,
+		DialTimeout: 90 * time.Second,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	dataShards, parityShards, err := layout(len(cl.Disks()), cfg.DataShards, cfg.ParityShards)
+	if err != nil {
+		cl.Close()
+		return nil, nil, err
+	}
+	st, err := store.NewErasure(cl.Disks(), dataShards, parityShards, logger)
+	if err != nil {
+		cl.Close()
+		return nil, nil, err
+	}
+	return st, cl.Close, nil
+}
+
+func layout(total, dataShards, parityShards int) (int, int, error) {
+	if total < 2 {
+		return 0, 0, fmt.Errorf("erasure coding needs at least 2 drives, got %d", total)
+	}
 	switch {
 	case dataShards == 0 && parityShards == 0:
 		parityShards = total / 2
@@ -149,9 +209,22 @@ func newStore(cfg config.Config, logger *slog.Logger) (store.Store, error) {
 		parityShards = total - dataShards
 	}
 	if dataShards < 1 || parityShards < 1 || dataShards+parityShards != total {
-		return nil, fmt.Errorf("invalid erasure layout: %d drives, %d data + %d parity", total, dataShards, parityShards)
+		return 0, 0, fmt.Errorf("invalid erasure layout: %d drives, %d data + %d parity", total, dataShards, parityShards)
 	}
-	return store.NewErasure(cfg.DataDirs, dataShards, parityShards, logger)
+	return dataShards, parityShards, nil
+}
+
+func splitPeers(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func cleanupLoop(ctx context.Context, st store.Store, logger *slog.Logger) {

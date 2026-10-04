@@ -27,9 +27,10 @@
 ### 明确不做（本阶段）
 
 - 多部分上传的最小分片大小（5MiB）与合成体校验和验证尚未强制。
-- 纠删码为整对象内存编码（非流式分块），超大对象受内存限制。
+- 纠删码为整对象内存编码（非流式分块），超大对象受内存与 gRPC 消息上限（128MiB）限制。
 - 版本控制分页仅支持 key-marker；无 MFA-delete。
-- IAM、生命周期、事件通知、分布式。
+- 分布式为静态成员、无分布式锁/leader；不做并发写同一 key 的协调。
+- IAM、生命周期、事件通知。
 - 流式签名的 **Trailer 变体**（`STREAMING-...-TRAILER`）：仅支持标准流式 chunk。
 - 虚拟主机风格（virtual-host style）寻址：仅支持 path-style。
 
@@ -127,9 +128,19 @@ gos3/
 - [x] Docker 验证：enable / 多版本 / 删除标记 / 永久删除 / suspend
 - [ ] `version-id-marker` 分页、MFA-delete（见 README 限制）
 
+### M5 · gRPC 分布式（已完成 ✅）
+
+- [x] `internal/disk`：`Disk` 抽象 + `Local`（文件系统）+ `Remote`（gRPC 客户端）
+- [x] `disk.proto` + 生成代码（protoc-gen-go / protoc-gen-go-grpc）
+- [x] `internal/cluster`：gRPC 磁盘服务、对等节点发现（Info）、全局盘集有序装配
+- [x] `store.Erasure` 重构为面向 `[]disk.Disk`，本地/远程同一套代码
+- [x] 静态成员 + 读写 quorum；杀掉整个节点后由存活节点的校验分片重建
+- [x] Docker 验证：2 节点 × 2 盘，杀 node1 后经 node2 重建读取
+- [ ] 分布式锁 / leader 选举（当前假设无并发写冲突）
+- [ ] 流式分块纠删码（当前整对象内存编码，限制 gRPC 消息 128MiB）
+
 ### 后续里程碑（占位）
 
-- [ ] M5 gRPC 分布式 + Quorum + 自愈
 - [ ] M6 IAM / 生命周期
 - [ ] M7 OTel / slog 增强 / 构造器注入重构
 

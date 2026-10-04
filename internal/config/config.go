@@ -18,6 +18,9 @@ type Config struct {
 	DataDirs          []string
 	DataShards        int
 	ParityShards      int
+	GRPCAddress       string
+	Advertise         string
+	Peers             []string
 	Region            string
 	RootUser          string
 	RootPass          string
@@ -30,6 +33,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Address:           DefaultAddress,
+		GRPCAddress:       ":9001",
 		Region:            DefaultRegion,
 		RootUser:          envOr("GOS3_ROOT_USER", "minioadmin"),
 		RootPass:          envOr("GOS3_ROOT_PASSWORD", "minioadmin"),

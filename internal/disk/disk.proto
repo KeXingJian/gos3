@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package disk;
+
+option go_package = "github.com/kxj/gos3/internal/disk;disk";
+
+message Empty {}
+
+message FileRequest {
+  int32 drive = 1;
+  string path = 2;
+}
+
+message FileResponse {
+  bytes data = 1;
+}
+
+message WriteRequest {
+  int32 drive = 1;
+  string path = 2;
+  bytes data = 3;
+}
+
+message StatResponse {
+  bool exists = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  int64 mod_unix = 4;
+}
+
+message DirEntry {
+  string name = 1;
+  bool is_dir = 2;
+}
+
+message DirResponse {
+  repeated DirEntry entries = 1;
+}
+
+message WalkResponse {
+  repeated string files = 1;
+  repeated string dirs = 2;
+}
+
+message NodeInfoRequest {}
+
+message NodeInfo {
+  string address = 1;
+  repeated string drives = 2;
+}
+
+service DiskService {
+  rpc Info(NodeInfoRequest) returns (NodeInfo);
+  rpc ReadFile(FileRequest) returns (FileResponse);
+  rpc WriteFile(WriteRequest) returns (Empty);
+  rpc DeleteFile(FileRequest) returns (Empty);
+  rpc DeleteDir(FileRequest) returns (Empty);
+  rpc MakeDir(FileRequest) returns (Empty);
+  rpc Stat(FileRequest) returns (StatResponse);
+  rpc ListDir(FileRequest) returns (DirResponse);
+  rpc Walk(FileRequest) returns (WalkResponse);
+  rpc Health(Empty) returns (Empty);
+}

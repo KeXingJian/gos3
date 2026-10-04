@@ -11,13 +11,15 @@ A minimal, S3-compatible object storage server written in Go, built as a learnin
 - Object versioning: enable/suspend, version IDs, delete markers, ListObjectVersions
 - Multipart upload: Initiate / UploadPart / ListParts / Complete / Abort / ListMultipartUploads
 - Erasure coding across N drives (Reed-Solomon), write/read quorum, recovery from drive loss
+- Distributed clusters: drives on peer nodes accessed over **gRPC + protobuf**; a whole node can
+  fail and objects remain readable (reconstructed from parity shards on survivors)
 - AWS Signature V4: header signing, presigned URLs, streaming chunk signatures
 - Versioned JSON metadata (`<root>/.meta/<bucket>/<object>.json` holds a list of versions),
   with per-version data under `<root>/.data/<bucket>/<object>/<versionId>`
 - Multipart staging under `<root>/.multipart/<bucket>/<uploadId>/` with stale-upload cleanup
 - Range requests and conditional requests via `http.ServeContent`
 - Graceful shutdown, structured logging (`log/slog`), request IDs
-- Only external dependency: `klauspost/reedsolomon`
+- External dependencies: `klauspost/reedsolomon`, `google.golang.org/grpc`, `google.golang.org/protobuf`
 
 ## Build & Run
 
@@ -32,6 +34,10 @@ make build
 
 # override shard counts explicitly
 ./gos3 server -data-shards 3 -parity-shards 1 /data/d1 /data/d2 /data/d3 /data/d4
+
+# distributed: 2 nodes x 2 drives each (run on each node, swapping -advertise/-peers)
+./gos3 server -advertise node1:9001 -peers node2:9001 /data/d1 /data/d2
+./gos3 server -advertise node2:9001 -peers node1:9001 /data/d1 /data/d2
 ```
 
 Default credentials: `minioadmin` / `minioadmin`
@@ -70,6 +76,13 @@ docker compose down -v
 The host port is `19000` by default to avoid clashing with a local MinIO on `9000`;
 override with `GOS3_PORT=...`. The `verify` image bundles `mc` (copied from `minio/mc`).
 
+Distributed cluster (2 nodes x 2 drives): writes across both nodes, then stops `node1`
+and reads back through `node2` (reconstructing data from parity shards):
+
+```sh
+make verify-dist
+```
+
 ## Architecture
 
 ```mermaid
@@ -84,10 +97,17 @@ flowchart TD
         ER --> RS["internal/erasure (Reed-Solomon)"]
     end
     FS --> DATA[<root>/.data/bucket/object/versionId + .meta]
-    ER --> D1[drive1/.data/bucket/object/versionId = shard0]
-    ER --> D2[drive2/.data/bucket/object/versionId = shard1]
-    ER --> DN["... datan + parityN"]
+    ER --> DK{"disk.Disk"}
+    DK --> LOCAL["disk.Local (this node's drives)"]
+    DK --> REMOTE["disk.Remote (gRPC -> peer drives)"]
+    LOCAL --> SH[<drive>/.data/bucket/object/versionId = shard_i]
+    REMOTE --> SH2[peer drive shards]
 ```
+
+The `Erasure` object layer is written only against the `disk.Disk` interface, so the
+same code drives local directories and remote nodes. `internal/cluster` starts the gRPC
+disk service, discovers peers, and assembles the global ordered drive list (sorted by
+node address), which every node computes identically.
 
 Request pipeline:
 
@@ -116,6 +136,8 @@ sequenceDiagram
 | `internal/sign` | SigV4 verification and streaming chunk decoding |
 | `internal/store` | Storage interface, filesystem (`FS`) and erasure (`Erasure`) backends |
 | `internal/erasure` | Reed-Solomon encode/decode (`klauspost/reedsolomon`) |
+| `internal/disk` | `Disk` abstraction: `Local` (filesystem) and `Remote` (gRPC), plus generated proto |
+| `internal/cluster` | gRPC disk service, peer discovery, global drive assembly |
 | `internal/api` | S3 handlers, XML responses, error model |
 | `internal/server` | Router and middleware chain |
 | `internal/version` | Version info injected via ldflags |
@@ -125,12 +147,15 @@ sequenceDiagram
 - `ListObjectVersions` pagination supports `key-marker` but not `version-id-marker`.
 - No MFA-delete or version-level legal hold/retention.
 - Erasure coding is currently **whole-object and in-memory** (no per-block streaming), so very large
-  objects are bounded by RAM. MinIO streams block-by-block; that is a future step.
+  objects are bounded by RAM. This also bounds the gRPC shard message size (raised to 128 MiB);
+  MinIO streams block-by-block, which is a future step.
 - Erasure layout (drive count, data/parity) is fixed at startup and not persisted in a `format.json`,
   so data must be read back with the same layout.
-- Multipart staging lives on the first drive only; the assembled object is erasure-coded on completion.
+- Cluster membership is static (flags), with no distributed lock/leader election; concurrent writes
+  to the same key from different nodes are not coordinated.
+- Multipart staging lives on the first global drive only; the assembled object is erasure-coded on completion.
 - Composite multipart ETag is `md5(concat(part md5s))-N`; no server-side checksum verification of the assembled body.
 - Minimum part size (5 MiB except the last) is not enforced yet.
 - Streaming signature **trailer** variant (`...-TRAILER`) not supported.
-- Versioning, IAM, lifecycle, replication, erasure coding, distribution not implemented.
+- IAM, lifecycle, and event notification not implemented.
 - Path-style addressing only (no virtual-host style).
