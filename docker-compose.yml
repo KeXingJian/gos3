@@ -8,7 +8,7 @@ services:
         COMMIT: ${GOS3_COMMIT:-unknown}
         BUILDTIME: ${GOS3_BUILDTIME:-unknown}
     image: gos3:verify
-    command: ["server", "-address", ":9000", "/data"]
+    command: ["server", "-address", ":9000", "/data/d1", "/data/d2", "/data/d3", "/data/d4"]
     environment:
       GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
       GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
@@ -35,6 +35,9 @@ services:
       S3_ENDPOINT: http://gos3:9000
       S3_USER: ${GOS3_ROOT_USER:-minioadmin}
       S3_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+      ERASURE_DRIVES: "4"
+    volumes:
+      - gos3-data:/data
     restart: "no"
 
 volumes:

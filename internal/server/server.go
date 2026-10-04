@@ -63,12 +63,20 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	if object == "" {
 		switch r.Method {
 		case http.MethodGet:
-			if query.Has("uploads") {
+			switch {
+			case query.Has("versions"):
+				s.api.ListObjectVersions(w, r, bucket)
+				return
+			case query.Has("uploads"):
 				s.api.ListMultipartUploads(w, r, bucket)
 				return
 			}
 			s.api.ListObjects(w, r, bucket)
 		case http.MethodPut:
+			if query.Has("versioning") {
+				s.api.SetBucketVersioning(w, r, bucket)
+				return
+			}
 			s.api.CreateBucket(w, r, bucket)
 		case http.MethodHead:
 			s.api.HeadBucket(w, r, bucket)

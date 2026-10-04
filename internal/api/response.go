@@ -66,6 +66,44 @@ type versioningConfiguration struct {
 	Status  string   `xml:"Status,omitempty"`
 }
 
+type versioningConfigurationRequest struct {
+	XMLName xml.Name `xml:"VersioningConfiguration"`
+	Status  string   `xml:"Status"`
+}
+
+type versionEntry struct {
+	Key          string `xml:"Key"`
+	VersionID    string `xml:"VersionId"`
+	IsLatest     bool   `xml:"IsLatest"`
+	LastModified string `xml:"LastModified"`
+	ETag         string `xml:"ETag"`
+	Size         int64  `xml:"Size"`
+	StorageClass string `xml:"StorageClass"`
+}
+
+type deleteMarkerEntry struct {
+	Key          string `xml:"Key"`
+	VersionID    string `xml:"VersionId"`
+	IsLatest     bool   `xml:"IsLatest"`
+	LastModified string `xml:"LastModified"`
+}
+
+type listVersionsResult struct {
+	XMLName             xml.Name            `xml:"ListVersionsResult"`
+	Xmlns               string              `xml:"xmlns,attr"`
+	Name                string              `xml:"Name"`
+	Prefix              string              `xml:"Prefix"`
+	KeyMarker           string              `xml:"KeyMarker"`
+	VersionIDMarker     string              `xml:"VersionIdMarker"`
+	NextKeyMarker       string              `xml:"NextKeyMarker"`
+	NextVersionIDMarker string              `xml:"NextVersionIdMarker"`
+	MaxKeys             int                 `xml:"MaxKeys"`
+	IsTruncated         bool                `xml:"IsTruncated"`
+	Versions            []versionEntry      `xml:"Version"`
+	DeleteMarkers       []deleteMarkerEntry `xml:"DeleteMarker"`
+	CommonPrefixes      []commonPrefix      `xml:"CommonPrefixes"`
+}
+
 type initiateMultipartUploadResult struct {
 	XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
 	Xmlns    string   `xml:"xmlns,attr"`
@@ -133,7 +171,8 @@ type deleteRequest struct {
 }
 
 type deleteRequestObject struct {
-	Key string `xml:"Key"`
+	Key       string `xml:"Key"`
+	VersionID string `xml:"VersionId"`
 }
 
 type deletedObject struct {

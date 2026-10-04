@@ -87,7 +87,12 @@ func (h *Handler) ListObjects(w http.ResponseWriter, r *http.Request, bucket str
 		return
 	}
 	if q.Has("versioning") {
-		writeXML(w, http.StatusOK, versioningConfiguration{Xmlns: s3Namespace})
+		status, err := h.Store.GetBucketVersioning(r.Context(), bucket)
+		if err != nil {
+			h.writeStoreError(w, r, err)
+			return
+		}
+		writeXML(w, http.StatusOK, versioningConfiguration{Xmlns: s3Namespace, Status: status})
 		return
 	}
 
@@ -160,36 +165,55 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request, bucket, obje
 		return
 	}
 	w.Header().Set("ETag", quoteETag(info.ETag))
+	if info.VersionID != "" {
+		w.Header().Set("x-amz-version-id", info.VersionID)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	rc, info, err := h.Store.GetObject(r.Context(), bucket, object)
+	versionID := r.URL.Query().Get("versionId")
+	rc, info, err := h.Store.GetObject(r.Context(), bucket, object, versionID)
 	if err != nil {
-		h.writeStoreError(w, r, err)
+		h.writeObjectError(w, r, err)
 		return
 	}
 	defer rc.Close()
 	h.setObjectHeaders(w, info)
+	if info.VersionID != "" {
+		w.Header().Set("x-amz-version-id", info.VersionID)
+	}
 	http.ServeContent(w, r, "", info.ModTime, rc)
 }
 
 func (h *Handler) HeadObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	info, err := h.Store.StatObject(r.Context(), bucket, object)
+	versionID := r.URL.Query().Get("versionId")
+	info, err := h.Store.StatObject(r.Context(), bucket, object, versionID)
 	if err != nil {
-		h.writeStoreError(w, r, err)
+		h.writeObjectError(w, r, err)
 		return
 	}
 	h.setObjectHeaders(w, info)
+	if info.VersionID != "" {
+		w.Header().Set("x-amz-version-id", info.VersionID)
+	}
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.Header().Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusOK)
 }
 
 func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
-	if err := h.Store.DeleteObject(r.Context(), bucket, object); err != nil {
+	versionID := r.URL.Query().Get("versionId")
+	res, err := h.Store.DeleteObject(r.Context(), bucket, object, versionID)
+	if err != nil {
 		h.writeStoreError(w, r, err)
 		return
+	}
+	if res.VersionID != "" {
+		w.Header().Set("x-amz-version-id", res.VersionID)
+	}
+	if res.DeleteMarker {
+		w.Header().Set("x-amz-delete-marker", "true")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -200,19 +224,19 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request, bucket s
 		WriteError(w, r, ErrInvalidArgument)
 		return
 	}
-	keys := make([]string, 0, len(req.Objects))
+	specs := make([]store.ObjectToDelete, 0, len(req.Objects))
 	for _, o := range req.Objects {
-		keys = append(keys, o.Key)
+		specs = append(specs, store.ObjectToDelete{Object: o.Key, VersionID: o.VersionID})
 	}
-	errs := h.Store.DeleteObjects(r.Context(), bucket, keys)
+	errs := h.Store.DeleteObjects(r.Context(), bucket, specs)
 	out := deleteResult{Xmlns: s3Namespace}
-	for i, key := range keys {
+	for i, spec := range specs {
 		if errs != nil && i < len(errs) && errs[i] != nil {
-			out.Errors = append(out.Errors, deleteError{Key: key, Code: "InternalError", Message: errs[i].Error()})
+			out.Errors = append(out.Errors, deleteError{Key: spec.Object, Code: "InternalError", Message: errs[i].Error()})
 			continue
 		}
 		if !req.Quiet {
-			out.Deleted = append(out.Deleted, deletedObject{Key: key})
+			out.Deleted = append(out.Deleted, deletedObject{Key: spec.Object})
 		}
 	}
 	writeXML(w, http.StatusOK, out)
@@ -296,6 +320,9 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		h.writeStoreError(w, r, err)
 		return
 	}
+	if info.VersionID != "" {
+		w.Header().Set("x-amz-version-id", info.VersionID)
+	}
 	writeXML(w, http.StatusOK, completeMultipartUploadResult{
 		Xmlns:    s3Namespace,
 		Location: "/" + bucket + "/" + object,
@@ -336,6 +363,77 @@ func (h *Handler) ListMultipartUploads(w http.ResponseWriter, r *http.Request, b
 	writeXML(w, http.StatusOK, out)
 }
 
+func (h *Handler) SetBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
+	var req versioningConfigurationRequest
+	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteError(w, r, ErrInvalidArgument)
+		return
+	}
+	if err := h.Store.SetBucketVersioning(r.Context(), bucket, req.Status); err != nil {
+		h.writeStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) ListObjectVersions(w http.ResponseWriter, r *http.Request, bucket string) {
+	q := r.URL.Query()
+	opts := store.ListOptions{
+		Prefix:    q.Get("prefix"),
+		Delimiter: q.Get("delimiter"),
+		Marker:    q.Get("key-marker"),
+		MaxKeys:   normalizeMax(q.Get("max-keys")),
+	}
+	res, err := h.Store.ListObjectVersions(r.Context(), bucket, opts)
+	if err != nil {
+		h.writeStoreError(w, r, err)
+		return
+	}
+	out := listVersionsResult{
+		Xmlns:               s3Namespace,
+		Name:                bucket,
+		Prefix:              opts.Prefix,
+		KeyMarker:           q.Get("key-marker"),
+		VersionIDMarker:     q.Get("version-id-marker"),
+		MaxKeys:             opts.MaxKeys,
+		IsTruncated:         res.IsTruncated,
+		NextKeyMarker:       res.NextKeyMarker,
+		NextVersionIDMarker: res.NextVersionIDMarker,
+	}
+	for _, v := range res.Versions {
+		if v.DeleteMarker {
+			out.DeleteMarkers = append(out.DeleteMarkers, deleteMarkerEntry{
+				Key:          v.Name,
+				VersionID:    v.VersionID,
+				IsLatest:     v.IsLatest,
+				LastModified: v.ModTime.UTC().Format(time.RFC3339),
+			})
+			continue
+		}
+		out.Versions = append(out.Versions, versionEntry{
+			Key:          v.Name,
+			VersionID:    v.VersionID,
+			IsLatest:     v.IsLatest,
+			LastModified: v.ModTime.UTC().Format(time.RFC3339),
+			ETag:         quoteETag(v.ETag),
+			Size:         v.Size,
+			StorageClass: "STANDARD",
+		})
+	}
+	for _, p := range res.CommonPrefixes {
+		out.CommonPrefixes = append(out.CommonPrefixes, commonPrefix{Prefix: p})
+	}
+	writeXML(w, http.StatusOK, out)
+}
+
+func normalizeMax(value string) int {
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 || n > 1000 {
+		return 1000
+	}
+	return n
+}
+
 func objectContentType(r *http.Request) string {
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		return ct
@@ -363,6 +461,15 @@ func (h *Handler) setObjectHeaders(w http.ResponseWriter, info store.ObjectInfo)
 	}
 }
 
+func (h *Handler) writeObjectError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrDeleteMarker) {
+		w.Header().Set("x-amz-delete-marker", "true")
+		WriteError(w, r, ErrMethodNotAllowed)
+		return
+	}
+	h.writeStoreError(w, r, err)
+}
+
 func (h *Handler) writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, store.ErrBucketNotFound):
@@ -383,6 +490,10 @@ func (h *Handler) writeStoreError(w http.ResponseWriter, r *http.Request, err er
 		WriteError(w, r, ErrInvalidPart)
 	case errors.Is(err, store.ErrInvalidPartOrder):
 		WriteError(w, r, ErrInvalidPartOrder)
+	case errors.Is(err, store.ErrNoSuchVersion):
+		WriteError(w, r, ErrNoSuchVersion)
+	case errors.Is(err, store.ErrInvalidVersioning):
+		WriteError(w, r, ErrInvalidVersioning)
 	default:
 		h.Logger.Error("[gos3: internal-error]", "path", r.URL.Path, "error", err.Error())
 		WriteError(w, r, ErrInternalError)

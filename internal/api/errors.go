@@ -28,6 +28,8 @@ var (
 	ErrInvalidAccessKeyID      = Error{"InvalidAccessKeyId", "The AWS Access Key Id you provided does not exist in our records.", http.StatusForbidden}
 	ErrRequestTimeTooSkewed    = Error{"RequestTimeTooSkewed", "The difference between the request time and the server's time is too large.", http.StatusForbidden}
 	ErrAuthorizationMalformed  = Error{"AuthorizationHeaderMalformed", "The authorization header is malformed.", http.StatusBadRequest}
+	ErrNoSuchVersion           = Error{"NoSuchVersion", "The specified version does not exist.", http.StatusNotFound}
+	ErrInvalidVersioning       = Error{"InvalidArgument", "The versioning status is invalid.", http.StatusBadRequest}
 	ErrNoSuchUpload            = Error{"NoSuchUpload", "The specified multipart upload does not exist.", http.StatusNotFound}
 	ErrInvalidPart             = Error{"InvalidPart", "One or more of the specified parts could not be found.", http.StatusBadRequest}
 	ErrInvalidPartOrder        = Error{"InvalidPartOrder", "The list of parts was not in ascending order.", http.StatusBadRequest}

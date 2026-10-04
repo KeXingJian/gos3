@@ -19,6 +19,18 @@ var (
 	ErrInvalidUploadID  = errors.New("invalid upload id")
 	ErrInvalidPart      = errors.New("invalid part")
 	ErrInvalidPartOrder = errors.New("parts not in ascending order")
+
+	ErrNoSuchVersion     = errors.New("no such version")
+	ErrDeleteMarker      = errors.New("object is a delete marker")
+	ErrInvalidVersioning = errors.New("invalid versioning status")
+)
+
+const (
+	VersioningDisabled  = ""
+	VersioningEnabled   = "Enabled"
+	VersioningSuspended = "Suspended"
+
+	NullVersionID = "null"
 )
 
 type BucketInfo struct {
@@ -29,11 +41,18 @@ type BucketInfo struct {
 type ObjectInfo struct {
 	Bucket       string
 	Name         string
+	VersionID    string
+	DeleteMarker bool
 	Size         int64
 	ETag         string
 	ContentType  string
 	UserMetadata map[string]string
 	ModTime      time.Time
+}
+
+type VersionInfo struct {
+	ObjectInfo
+	IsLatest bool
 }
 
 type MultipartInfo struct {
@@ -55,6 +74,16 @@ type CompletePart struct {
 	ETag       string
 }
 
+type ObjectToDelete struct {
+	Object    string
+	VersionID string
+}
+
+type DeleteResult struct {
+	VersionID    string
+	DeleteMarker bool
+}
+
 type ListOptions struct {
 	Prefix    string
 	Delimiter string
@@ -69,18 +98,30 @@ type ListObjectsResult struct {
 	NextMarker     string
 }
 
+type ListVersionsResult struct {
+	Versions            []VersionInfo
+	CommonPrefixes      []string
+	IsTruncated         bool
+	NextKeyMarker       string
+	NextVersionIDMarker string
+}
+
 type Store interface {
 	MakeBucket(ctx context.Context, bucket string) error
 	DeleteBucket(ctx context.Context, bucket string) error
 	BucketExists(ctx context.Context, bucket string) (time.Time, bool, error)
 	ListBuckets(ctx context.Context) ([]BucketInfo, error)
 
+	GetBucketVersioning(ctx context.Context, bucket string) (string, error)
+	SetBucketVersioning(ctx context.Context, bucket, status string) error
+
 	PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (ObjectInfo, error)
-	GetObject(ctx context.Context, bucket, object string) (io.ReadSeekCloser, ObjectInfo, error)
-	StatObject(ctx context.Context, bucket, object string) (ObjectInfo, error)
-	DeleteObject(ctx context.Context, bucket, object string) error
-	DeleteObjects(ctx context.Context, bucket string, objects []string) []error
+	GetObject(ctx context.Context, bucket, object, versionID string) (io.ReadSeekCloser, ObjectInfo, error)
+	StatObject(ctx context.Context, bucket, object, versionID string) (ObjectInfo, error)
+	DeleteObject(ctx context.Context, bucket, object, versionID string) (DeleteResult, error)
+	DeleteObjects(ctx context.Context, bucket string, objects []ObjectToDelete) []error
 	ListObjects(ctx context.Context, bucket string, opts ListOptions) (ListObjectsResult, error)
+	ListObjectVersions(ctx context.Context, bucket string, opts ListOptions) (ListVersionsResult, error)
 
 	NewMultipartUpload(ctx context.Context, bucket, object, contentType string, userMeta map[string]string) (string, error)
 	PutObjectPart(ctx context.Context, bucket, object, uploadID string, partNumber int, data io.Reader) (PartInfo, error)

@@ -27,7 +27,9 @@
 ### 明确不做（本阶段）
 
 - 多部分上传的最小分片大小（5MiB）与合成体校验和验证尚未强制。
-- 版本控制、IAM、生命周期、事件通知、纠删码、分布式。
+- 纠删码为整对象内存编码（非流式分块），超大对象受内存限制。
+- 版本控制分页仅支持 key-marker；无 MFA-delete。
+- IAM、生命周期、事件通知、分布式。
 - 流式签名的 **Trailer 变体**（`STREAMING-...-TRAILER`）：仅支持标准流式 chunk。
 - 虚拟主机风格（virtual-host style）寻址：仅支持 path-style。
 
@@ -104,11 +106,31 @@ gos3/
 - [x] 过期分片上传清理（后台 ticker，默认 24h / 6h）
 - [x] 路由分发（`?uploads` / `?uploadId` / `?partNumber`）
 
+### M4 · 纠删码（单机多盘，已完成 ✅）
+
+- [x] `internal/erasure`：Reed-Solomon Encode/Decode（`klauspost/reedsolomon`）
+- [x] `store.Erasure`：多盘分片、写 quorum、读 quorum、任一盘丢失可重建
+- [x] 元数据复制到所有盘；列表/桶操作走首个盘
+- [x] 多部分上传：分片暂存首盘，Complete 时整对象纠删码落盘
+- [x] CLI 支持多数据目录 + `-data-shards`/`-parity-shards`
+- [x] Docker 验证：4 盘（2 data + 2 parity）拔盘恢复测试
+- [ ] 流式分块纠删码（当前为整对象内存编码，见限制）
+
+### 版本控制（已完成 ✅）
+
+- [x] 桶版本状态：enable / suspend（`GET/PUT /bucket?versioning`）
+- [x] 版本化元数据：一个对象多条版本记录，最新在前
+- [x] 每版本独立数据路径：`.data/<bucket>/<object>/<versionId>`（FS 与 Erasure 均支持）
+- [x] 删除标记：版本化删除生成删除标记；删除指定版本为永久删除
+- [x] `ListObjectVersions`（`GET /bucket?versions`）+ `versionId` 读写
+- [x] 批量删除支持 `<VersionId>`（`mc rm --version-id`）
+- [x] Docker 验证：enable / 多版本 / 删除标记 / 永久删除 / suspend
+- [ ] `version-id-marker` 分页、MFA-delete（见 README 限制）
+
 ### 后续里程碑（占位）
 
-- [ ] M4 纠删码（`klauspost/reedsolomon`）
 - [ ] M5 gRPC 分布式 + Quorum + 自愈
-- [ ] M6 IAM / 版本控制 / 生命周期
+- [ ] M6 IAM / 生命周期
 - [ ] M7 OTel / slog 增强 / 构造器注入重构
 
 ---

@@ -15,6 +15,9 @@ const (
 type Config struct {
 	Address           string
 	DataDir           string
+	DataDirs          []string
+	DataShards        int
+	ParityShards      int
 	Region            string
 	RootUser          string
 	RootPass          string

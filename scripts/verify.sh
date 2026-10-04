@@ -77,7 +77,29 @@ else
   bad "presigned URL generation"
 fi
 
-if mc rm "$ALIAS/$BUCKET/small.txt" "$ALIAS/$BUCKET/large.bin" "$ALIAS/$BUCKET/share.txt" >/dev/null 2>&1; then
+if [ "${ERASURE_DRIVES:-0}" -ge 2 ] && [ -d /data/d2 ]; then
+  yes 'gos3-erasure-line' | head -c 8388608 > "$WORK/erasure.bin"
+  E_MD5="$(md5sum "$WORK/erasure.bin" | cut -d' ' -f1)"
+  if mc cp "$WORK/erasure.bin" "$ALIAS/$BUCKET/erasure.bin" >/dev/null 2>&1; then
+    ok "erasure seed object"
+  else
+    bad "erasure seed object"
+  fi
+  rm -f "/data/d2/.data/$BUCKET/erasure.bin/null"
+  GOT="$(mc cat "$ALIAS/$BUCKET/erasure.bin" 2>/dev/null | md5sum | cut -d' ' -f1)"
+  check "erasure read after losing drive d2" "$E_MD5" "$GOT"
+  rm -f "/data/d3/.data/$BUCKET/erasure.bin/null"
+  GOT="$(mc cat "$ALIAS/$BUCKET/erasure.bin" 2>/dev/null | md5sum | cut -d' ' -f1)"
+  check "erasure read after losing drives d2+d3" "$E_MD5" "$GOT"
+  rm -f "/data/d4/.data/$BUCKET/erasure.bin/null"
+  if mc cat "$ALIAS/$BUCKET/erasure.bin" >/dev/null 2>&1; then
+    bad "erasure read with insufficient shards should fail"
+  else
+    ok "erasure read with insufficient shards rejected"
+  fi
+fi
+
+if mc rm "$ALIAS/$BUCKET/small.txt" "$ALIAS/$BUCKET/large.bin" "$ALIAS/$BUCKET/share.txt" "$ALIAS/$BUCKET/erasure.bin" >/dev/null 2>&1; then
   ok "delete objects"
 else
   bad "delete objects"
@@ -93,6 +115,40 @@ else
 fi
 mc rm --force "$ALIAS/$BUCKET/x.txt" >/dev/null 2>&1 || true
 mc rb "$ALIAS/$BUCKET" >/dev/null 2>&1 || true
+
+VBUCKET="$BUCKET-ver"
+mc rb --force "$ALIAS/$VBUCKET" >/dev/null 2>&1 || true
+mc mb "$ALIAS/$VBUCKET" >/dev/null 2>&1
+if mc version enable "$ALIAS/$VBUCKET" >/dev/null 2>&1; then ok "versioning enable"; else bad "versioning enable"; fi
+if mc version info "$ALIAS/$VBUCKET" 2>/dev/null | grep -qi "enabled"; then ok "versioning status enabled"; else bad "versioning status enabled"; fi
+
+printf 'v1\n' > "$WORK/v1.txt"
+printf 'v2\n' > "$WORK/v2.txt"
+mc cp "$WORK/v1.txt" "$ALIAS/$VBUCKET/v.txt" >/dev/null 2>&1
+mc cp "$WORK/v2.txt" "$ALIAS/$VBUCKET/v.txt" >/dev/null 2>&1
+VCOUNT="$(mc ls --versions "$ALIAS/$VBUCKET/" 2>/dev/null | grep -c 'v.txt')"
+if [ "$VCOUNT" -ge 2 ]; then ok "two versions stored"; else bad "two versions stored (got $VCOUNT)"; fi
+check "latest version content" "v2" "$(mc cat "$ALIAS/$VBUCKET/v.txt" 2>/dev/null)"
+
+mc rm "$ALIAS/$VBUCKET/v.txt" >/dev/null 2>&1
+if mc ls "$ALIAS/$VBUCKET/" 2>/dev/null | grep -q 'v.txt'; then bad "delete marker hides latest"; else ok "delete marker hides latest"; fi
+VCOUNT="$(mc ls --versions "$ALIAS/$VBUCKET/" 2>/dev/null | grep -c 'v.txt')"
+if [ "$VCOUNT" -ge 3 ]; then ok "versions retained after delete"; else bad "versions retained after delete (got $VCOUNT)"; fi
+
+VID="$(mc ls --versions --json "$ALIAS/$VBUCKET/" 2>/dev/null | sed -n 's/.*"versionId":"\([a-f0-9][a-f0-9]*\)".*/\1/p' | head -1)"
+if [ -n "$VID" ]; then
+  BEFORE="$(mc ls --versions "$ALIAS/$VBUCKET/" 2>/dev/null | grep -c 'v.txt')"
+  mc rm --version-id "$VID" "$ALIAS/$VBUCKET/v.txt" >/dev/null 2>&1
+  AFTER="$(mc ls --versions "$ALIAS/$VBUCKET/" 2>/dev/null | grep -c 'v.txt')"
+  if [ "$AFTER" -lt "$BEFORE" ]; then ok "permanent delete of a version"; else bad "permanent delete of a version"; fi
+else
+  bad "extract version id"
+fi
+
+if mc version suspend "$ALIAS/$VBUCKET" >/dev/null 2>&1; then ok "versioning suspend"; else bad "versioning suspend"; fi
+
+mc rm --recursive --force --versions "$ALIAS/$VBUCKET" >/dev/null 2>&1 || true
+mc rb --force "$ALIAS/$VBUCKET" >/dev/null 2>&1 || true
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="
