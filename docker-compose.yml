@@ -1,0 +1,41 @@
+services:
+  gos3:
+    build:
+      context: .
+      target: runtime
+      args:
+        VERSION: ${GOS3_VERSION:-dev}
+        COMMIT: ${GOS3_COMMIT:-unknown}
+        BUILDTIME: ${GOS3_BUILDTIME:-unknown}
+    image: gos3:verify
+    command: ["server", "-address", ":9000", "/data"]
+    environment:
+      GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
+      GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${GOS3_PORT:-19000}:9000"
+    volumes:
+      - gos3-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  verify:
+    build:
+      context: .
+      target: verify
+    image: gos3-verify:local
+    depends_on:
+      gos3:
+        condition: service_healthy
+    environment:
+      S3_ENDPOINT: http://gos3:9000
+      S3_USER: ${GOS3_ROOT_USER:-minioadmin}
+      S3_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+    restart: "no"
+
+volumes:
+  gos3-data:

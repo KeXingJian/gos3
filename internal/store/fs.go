@@ -1,0 +1,863 @@
+package store
+
+import (
+	"context"
+	"crypto/md5"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	metaDir      = ".meta"
+	tmpDir       = ".tmp"
+	multipartDir = ".multipart"
+)
+
+type fsMeta struct {
+	Name         string            `json:"name"`
+	Size         int64             `json:"size"`
+	ETag         string            `json:"etag"`
+	ContentType  string            `json:"contentType"`
+	UserMetadata map[string]string `json:"userMetadata,omitempty"`
+	ModTime      time.Time         `json:"modTime"`
+}
+
+type fsUploadMeta struct {
+	Bucket       string            `json:"bucket"`
+	Object       string            `json:"object"`
+	UploadID     string            `json:"uploadId"`
+	ContentType  string            `json:"contentType"`
+	UserMetadata map[string]string `json:"userMetadata,omitempty"`
+	Initiated    time.Time         `json:"initiated"`
+}
+
+type fsPartMeta struct {
+	PartNumber int       `json:"partNumber"`
+	ETag       string    `json:"etag"`
+	Size       int64     `json:"size"`
+	ModTime    time.Time `json:"modTime"`
+}
+
+func (m fsMeta) toInfo(bucket string) ObjectInfo {
+	return ObjectInfo{
+		Bucket:       bucket,
+		Name:         m.Name,
+		Size:         m.Size,
+		ETag:         m.ETag,
+		ContentType:  m.ContentType,
+		UserMetadata: m.UserMetadata,
+		ModTime:      m.ModTime,
+	}
+}
+
+type FS struct {
+	root string
+	log  *slog.Logger
+}
+
+func NewFS(root string, log *slog.Logger) (*FS, error) {
+	if root == "" {
+		return nil, errors.New("data directory is required")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return nil, err
+	}
+	f := &FS{root: abs, log: log}
+	log.Info("[gos3: storage-ready]", "root", abs)
+	return f, nil
+}
+
+func (f *FS) bucketPath(bucket string) string {
+	return filepath.Join(f.root, bucket)
+}
+
+func (f *FS) objectPath(bucket, object string) string {
+	return filepath.Join(f.root, bucket, filepath.FromSlash(object))
+}
+
+func (f *FS) metaPath(bucket, object string) string {
+	return filepath.Join(f.root, metaDir, bucket, filepath.FromSlash(object)+".json")
+}
+
+func (f *FS) tempDir() string {
+	return filepath.Join(f.root, tmpDir)
+}
+
+func (f *FS) uploadDir(bucket, uploadID string) string {
+	return filepath.Join(f.root, multipartDir, bucket, uploadID)
+}
+
+func (f *FS) uploadMetaPath(bucket, uploadID string) string {
+	return filepath.Join(f.uploadDir(bucket, uploadID), "meta.json")
+}
+
+func (f *FS) partPath(bucket, uploadID string, partNumber int) string {
+	return filepath.Join(f.uploadDir(bucket, uploadID), fmt.Sprintf("part.%d", partNumber))
+}
+
+func (f *FS) partMetaPath(bucket, uploadID string, partNumber int) string {
+	return filepath.Join(f.uploadDir(bucket, uploadID), fmt.Sprintf("part.%d.json", partNumber))
+}
+
+func (f *FS) MakeBucket(ctx context.Context, bucket string) error {
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	p := f.bucketPath(bucket)
+	if _, err := os.Stat(p); err == nil {
+		return ErrBucketExists
+	}
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		return err
+	}
+	f.log.Info("[gos3: make-bucket]", "bucket", bucket)
+	return nil
+}
+
+func (f *FS) DeleteBucket(ctx context.Context, bucket string) error {
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	p := f.bucketPath(bucket)
+	if _, err := os.Stat(p); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrBucketNotFound
+		}
+		return err
+	}
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		return err
+	}
+	if len(entries) > 0 {
+		return ErrBucketNotEmpty
+	}
+	if err := os.Remove(p); err != nil {
+		return err
+	}
+	_ = os.RemoveAll(filepath.Join(f.root, metaDir, bucket))
+	f.log.Info("[gos3: delete-bucket]", "bucket", bucket)
+	return nil
+}
+
+func (f *FS) BucketExists(ctx context.Context, bucket string) (time.Time, bool, error) {
+	if !validBucketName(bucket) {
+		return time.Time{}, false, ErrInvalidBucketName
+	}
+	fi, err := os.Stat(f.bucketPath(bucket))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, err
+	}
+	if !fi.IsDir() {
+		return time.Time{}, false, nil
+	}
+	return fi.ModTime(), true, nil
+}
+
+func (f *FS) ListBuckets(ctx context.Context) ([]BucketInfo, error) {
+	entries, err := os.ReadDir(f.root)
+	if err != nil {
+		return nil, err
+	}
+	var buckets []BucketInfo
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == metaDir || e.Name() == tmpDir {
+			continue
+		}
+		if !validBucketName(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		buckets = append(buckets, BucketInfo{Name: e.Name(), Created: info.ModTime()})
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Name < buckets[j].Name })
+	return buckets, nil
+}
+
+func (f *FS) PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (ObjectInfo, error) {
+	if !validBucketName(bucket) {
+		return ObjectInfo{}, ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return ObjectInfo{}, ErrInvalidObjectName
+	}
+	if _, err := os.Stat(f.bucketPath(bucket)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ObjectInfo{}, ErrBucketNotFound
+		}
+		return ObjectInfo{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := os.MkdirAll(f.tempDir(), 0o700); err != nil {
+		return ObjectInfo{}, err
+	}
+	tmp, err := os.CreateTemp(f.tempDir(), "put-*")
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	hash := md5.New()
+	written, err := io.Copy(io.MultiWriter(tmp, hash), data)
+	if err != nil {
+		_ = tmp.Close()
+		return ObjectInfo{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		return ObjectInfo{}, err
+	}
+
+	dst := f.objectPath(bucket, object)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return ObjectInfo{}, err
+	}
+	tmpName = ""
+
+	meta := fsMeta{
+		Name:         object,
+		Size:         written,
+		ETag:         hex.EncodeToString(hash.Sum(nil)),
+		ContentType:  contentType,
+		UserMetadata: userMeta,
+		ModTime:      time.Now().UTC(),
+	}
+	if err := f.writeMeta(bucket, object, meta); err != nil {
+		return ObjectInfo{}, err
+	}
+	f.log.Info("[gos3: put-object]", "bucket", bucket, "object", object, "size", written, "etag", meta.ETag)
+	return meta.toInfo(bucket), nil
+}
+
+func (f *FS) GetObject(ctx context.Context, bucket, object string) (io.ReadSeekCloser, ObjectInfo, error) {
+	if !validBucketName(bucket) {
+		return nil, ObjectInfo{}, ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return nil, ObjectInfo{}, ErrInvalidObjectName
+	}
+	meta, err := f.readMeta(bucket, object)
+	if err != nil {
+		return nil, ObjectInfo{}, err
+	}
+	file, err := os.Open(f.objectPath(bucket, object))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ObjectInfo{}, ErrObjectNotFound
+		}
+		return nil, ObjectInfo{}, err
+	}
+	return file, meta.toInfo(bucket), nil
+}
+
+func (f *FS) StatObject(ctx context.Context, bucket, object string) (ObjectInfo, error) {
+	if !validBucketName(bucket) {
+		return ObjectInfo{}, ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return ObjectInfo{}, ErrInvalidObjectName
+	}
+	meta, err := f.readMeta(bucket, object)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	return meta.toInfo(bucket), nil
+}
+
+func (f *FS) DeleteObject(ctx context.Context, bucket, object string) error {
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return ErrInvalidObjectName
+	}
+	_ = os.Remove(f.objectPath(bucket, object))
+	_ = os.Remove(f.metaPath(bucket, object))
+	f.log.Info("[gos3: delete-object]", "bucket", bucket, "object", object)
+	return nil
+}
+
+func (f *FS) DeleteObjects(ctx context.Context, bucket string, objects []string) []error {
+	errs := make([]error, len(objects))
+	for i, object := range objects {
+		errs[i] = f.DeleteObject(ctx, bucket, object)
+	}
+	return errs
+}
+
+func (f *FS) ListObjects(ctx context.Context, bucket string, opts ListOptions) (ListObjectsResult, error) {
+	if !validBucketName(bucket) {
+		return ListObjectsResult{}, ErrInvalidBucketName
+	}
+	base := f.bucketPath(bucket)
+	if fi, err := os.Stat(base); err != nil || !fi.IsDir() {
+		return ListObjectsResult{}, ErrBucketNotFound
+	}
+	max := opts.MaxKeys
+	if max <= 0 || max > 1000 {
+		max = 1000
+	}
+
+	var keys []string
+	err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if strings.HasPrefix(key, opts.Prefix) {
+			keys = append(keys, key)
+		}
+		return nil
+	})
+	if err != nil {
+		return ListObjectsResult{}, err
+	}
+	sort.Strings(keys)
+
+	type entry struct {
+		sortKey  string
+		key      string
+		prefix   string
+		isPrefix bool
+	}
+	var entries []entry
+	if opts.Delimiter == "" {
+		for _, key := range keys {
+			entries = append(entries, entry{sortKey: key, key: key})
+		}
+	} else {
+		seen := make(map[string]struct{})
+		for _, key := range keys {
+			rest := key[len(opts.Prefix):]
+			idx := strings.Index(rest, opts.Delimiter)
+			if idx < 0 {
+				entries = append(entries, entry{sortKey: key, key: key})
+				continue
+			}
+			cp := opts.Prefix + rest[:idx+len(opts.Delimiter)]
+			if _, ok := seen[cp]; ok {
+				continue
+			}
+			seen[cp] = struct{}{}
+			entries = append(entries, entry{sortKey: cp, prefix: cp, isPrefix: true})
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].sortKey < entries[j].sortKey })
+
+	var result ListObjectsResult
+	lastMarker := ""
+	for _, e := range entries {
+		if opts.Marker != "" && e.sortKey <= opts.Marker {
+			continue
+		}
+		if len(result.Objects)+len(result.CommonPrefixes) >= max {
+			result.IsTruncated = true
+			result.NextMarker = lastMarker
+			break
+		}
+		if e.isPrefix {
+			result.CommonPrefixes = append(result.CommonPrefixes, e.prefix)
+		} else {
+			info, err := f.statFromMeta(bucket, e.key)
+			if err != nil {
+				continue
+			}
+			result.Objects = append(result.Objects, info)
+		}
+		lastMarker = e.sortKey
+	}
+	return result, nil
+}
+
+func (f *FS) statFromMeta(bucket, object string) (ObjectInfo, error) {
+	meta, err := f.readMeta(bucket, object)
+	if err == nil {
+		return meta.toInfo(bucket), nil
+	}
+	if !errors.Is(err, ErrObjectNotFound) {
+		return ObjectInfo{}, err
+	}
+	fi, err := os.Stat(f.objectPath(bucket, object))
+	if err != nil {
+		return ObjectInfo{}, ErrObjectNotFound
+	}
+	return ObjectInfo{
+		Bucket:      bucket,
+		Name:        object,
+		Size:        fi.Size(),
+		ContentType: "application/octet-stream",
+		ModTime:     fi.ModTime().UTC(),
+	}, nil
+}
+
+func (f *FS) NewMultipartUpload(ctx context.Context, bucket, object, contentType string, userMeta map[string]string) (string, error) {
+	if !validBucketName(bucket) {
+		return "", ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return "", ErrInvalidObjectName
+	}
+	if _, err := os.Stat(f.bucketPath(bucket)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", ErrBucketNotFound
+		}
+		return "", err
+	}
+	uploadID, err := newUploadID()
+	if err != nil {
+		return "", err
+	}
+	meta := fsUploadMeta{
+		Bucket:       bucket,
+		Object:       object,
+		UploadID:     uploadID,
+		ContentType:  contentType,
+		UserMetadata: userMeta,
+		Initiated:    time.Now().UTC(),
+	}
+	if err := writeJSONFile(f.uploadMetaPath(bucket, uploadID), meta); err != nil {
+		return "", err
+	}
+	f.log.Info("[gos3: new-multipart-upload]", "bucket", bucket, "object", object, "upload-id", uploadID)
+	return uploadID, nil
+}
+
+func (f *FS) PutObjectPart(ctx context.Context, bucket, object, uploadID string, partNumber int, data io.Reader) (PartInfo, error) {
+	if !validBucketName(bucket) {
+		return PartInfo{}, ErrInvalidBucketName
+	}
+	if !validUploadID(uploadID) {
+		return PartInfo{}, ErrInvalidUploadID
+	}
+	if partNumber < 1 || partNumber > 10000 {
+		return PartInfo{}, ErrInvalidPart
+	}
+	if _, err := f.readUploadMeta(bucket, uploadID); err != nil {
+		return PartInfo{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return PartInfo{}, err
+	}
+	dir := f.uploadDir(bucket, uploadID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return PartInfo{}, err
+	}
+	tmp, err := os.CreateTemp(dir, "part-*")
+	if err != nil {
+		return PartInfo{}, err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	hash := md5.New()
+	written, err := io.Copy(io.MultiWriter(tmp, hash), data)
+	if err != nil {
+		_ = tmp.Close()
+		return PartInfo{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		return PartInfo{}, err
+	}
+	if err := os.Rename(tmpName, f.partPath(bucket, uploadID, partNumber)); err != nil {
+		return PartInfo{}, err
+	}
+	tmpName = ""
+
+	part := fsPartMeta{
+		PartNumber: partNumber,
+		ETag:       hex.EncodeToString(hash.Sum(nil)),
+		Size:       written,
+		ModTime:    time.Now().UTC(),
+	}
+	if err := writeJSONFile(f.partMetaPath(bucket, uploadID, partNumber), part); err != nil {
+		return PartInfo{}, err
+	}
+	f.log.Info("[gos3: upload-part]", "bucket", bucket, "object", object, "upload-id", uploadID, "part", partNumber, "size", written)
+	return PartInfo{PartNumber: partNumber, ETag: part.ETag, Size: part.Size, LastModified: part.ModTime}, nil
+}
+
+func (f *FS) ListObjectParts(ctx context.Context, bucket, object, uploadID string) ([]PartInfo, error) {
+	if !validBucketName(bucket) {
+		return nil, ErrInvalidBucketName
+	}
+	if !validUploadID(uploadID) {
+		return nil, ErrInvalidUploadID
+	}
+	if _, err := f.readUploadMeta(bucket, uploadID); err != nil {
+		return nil, err
+	}
+	dir := f.uploadDir(bucket, uploadID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var parts []PartInfo
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "part.") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		var part fsPartMeta
+		if err := readJSONFile(filepath.Join(dir, name), &part); err != nil {
+			continue
+		}
+		parts = append(parts, PartInfo{
+			PartNumber:   part.PartNumber,
+			ETag:         part.ETag,
+			Size:         part.Size,
+			LastModified: part.ModTime,
+		})
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
+	return parts, nil
+}
+
+func (f *FS) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []CompletePart) (ObjectInfo, error) {
+	if !validBucketName(bucket) {
+		return ObjectInfo{}, ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return ObjectInfo{}, ErrInvalidObjectName
+	}
+	if !validUploadID(uploadID) {
+		return ObjectInfo{}, ErrInvalidUploadID
+	}
+	upload, err := f.readUploadMeta(bucket, uploadID)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	if len(parts) == 0 {
+		return ObjectInfo{}, ErrInvalidPart
+	}
+	for i := 1; i < len(parts); i++ {
+		if parts[i].PartNumber <= parts[i-1].PartNumber {
+			return ObjectInfo{}, ErrInvalidPartOrder
+		}
+	}
+
+	if err := os.MkdirAll(f.tempDir(), 0o700); err != nil {
+		return ObjectInfo{}, err
+	}
+	tmp, err := os.CreateTemp(f.tempDir(), "complete-*")
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	composite := md5.New()
+	var total int64
+	for _, p := range parts {
+		if p.PartNumber < 1 || p.PartNumber > 10000 {
+			_ = tmp.Close()
+			return ObjectInfo{}, ErrInvalidPart
+		}
+		partFile, err := os.Open(f.partPath(bucket, uploadID, p.PartNumber))
+		if err != nil {
+			_ = tmp.Close()
+			if errors.Is(err, os.ErrNotExist) {
+				return ObjectInfo{}, ErrInvalidPart
+			}
+			return ObjectInfo{}, err
+		}
+		partHash := md5.New()
+		n, err := io.Copy(tmp, io.TeeReader(partFile, partHash))
+		_ = partFile.Close()
+		if err != nil {
+			_ = tmp.Close()
+			return ObjectInfo{}, err
+		}
+		sum := partHash.Sum(nil)
+		if p.ETag != "" && !strings.EqualFold(stripQuotes(p.ETag), hex.EncodeToString(sum)) {
+			_ = tmp.Close()
+			return ObjectInfo{}, ErrInvalidPart
+		}
+		composite.Write(sum)
+		total += n
+	}
+	if err := tmp.Close(); err != nil {
+		return ObjectInfo{}, err
+	}
+
+	dst := f.objectPath(bucket, object)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return ObjectInfo{}, err
+	}
+	tmpName = ""
+
+	meta := fsMeta{
+		Name:         object,
+		Size:         total,
+		ETag:         hex.EncodeToString(composite.Sum(nil)) + "-" + strconv.Itoa(len(parts)),
+		ContentType:  upload.ContentType,
+		UserMetadata: upload.UserMetadata,
+		ModTime:      time.Now().UTC(),
+	}
+	if err := f.writeMeta(bucket, object, meta); err != nil {
+		return ObjectInfo{}, err
+	}
+	_ = os.RemoveAll(f.uploadDir(bucket, uploadID))
+	f.log.Info("[gos3: complete-multipart-upload]", "bucket", bucket, "object", object, "upload-id", uploadID, "size", total, "etag", meta.ETag)
+	return meta.toInfo(bucket), nil
+}
+
+func (f *FS) AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string) error {
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	if !validUploadID(uploadID) {
+		return ErrInvalidUploadID
+	}
+	if _, err := f.readUploadMeta(bucket, uploadID); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(f.uploadDir(bucket, uploadID)); err != nil {
+		return err
+	}
+	f.log.Info("[gos3: abort-multipart-upload]", "bucket", bucket, "object", object, "upload-id", uploadID)
+	return nil
+}
+
+func (f *FS) ListMultipartUploads(ctx context.Context, bucket string) ([]MultipartInfo, error) {
+	if !validBucketName(bucket) {
+		return nil, ErrInvalidBucketName
+	}
+	base := filepath.Join(f.root, multipartDir, bucket)
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var uploads []MultipartInfo
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		var meta fsUploadMeta
+		if err := readJSONFile(filepath.Join(base, e.Name(), "meta.json"), &meta); err != nil {
+			continue
+		}
+		uploads = append(uploads, MultipartInfo{
+			Bucket:    bucket,
+			Object:    meta.Object,
+			UploadID:  meta.UploadID,
+			Initiated: meta.Initiated,
+		})
+	}
+	sort.Slice(uploads, func(i, j int) bool { return uploads[i].Object < uploads[j].Object })
+	return uploads, nil
+}
+
+func (f *FS) CleanupStaleUploads(ctx context.Context, olderThan time.Duration) (int, error) {
+	base := filepath.Join(f.root, multipartDir)
+	cutoff := time.Now().Add(-olderThan)
+	removed := 0
+	err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) != 2 {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if info.ModTime().After(cutoff) {
+			return filepath.SkipDir
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+		removed++
+		f.log.Info("[gos3: cleanup-stale-upload]", "path", path)
+		return filepath.SkipDir
+	})
+	if err != nil {
+		return removed, err
+	}
+	return removed, nil
+}
+
+func (f *FS) readUploadMeta(bucket, uploadID string) (fsUploadMeta, error) {
+	var meta fsUploadMeta
+	if err := readJSONFile(f.uploadMetaPath(bucket, uploadID), &meta); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fsUploadMeta{}, ErrUploadNotFound
+		}
+		return fsUploadMeta{}, err
+	}
+	return meta, nil
+}
+
+func newUploadID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func validUploadID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func stripQuotes(s string) string {
+	return strings.Trim(s, "\"")
+}
+
+func (f *FS) writeMeta(bucket, object string, meta fsMeta) error {
+	return writeJSONFile(f.metaPath(bucket, object), meta)
+}
+
+func (f *FS) readMeta(bucket, object string) (fsMeta, error) {
+	var meta fsMeta
+	if err := readJSONFile(f.metaPath(bucket, object), &meta); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fsMeta{}, ErrObjectNotFound
+		}
+		return fsMeta{}, err
+	}
+	return meta, nil
+}
+
+func writeJSONFile(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func readJSONFile(path string, v any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+func validBucketName(bucket string) bool {
+	l := len(bucket)
+	if l < 3 || l > 63 {
+		return false
+	}
+	if strings.Contains(bucket, "..") {
+		return false
+	}
+	for i := 0; i < l; i++ {
+		c := bucket[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return isAlnum(bucket[0]) && isAlnum(bucket[l-1])
+}
+
+func validObjectName(object string) bool {
+	if object == "" || len(object) > 1024 {
+		return false
+	}
+	if strings.HasPrefix(object, "/") || strings.HasSuffix(object, "/") {
+		return false
+	}
+	if strings.ContainsRune(object, 0) || strings.Contains(object, "\\") {
+		return false
+	}
+	for _, seg := range strings.Split(object, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func isAlnum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+}

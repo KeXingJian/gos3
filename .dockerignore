@@ -1,0 +1,9 @@
+.git
+.gitignore
+gos3
+data
+*.test
+*.out
+Dockerfile
+docker-compose.yml
+docs
