@@ -6,27 +6,30 @@ import (
 	"strings"
 
 	"github.com/kxj/gos3/internal/api"
-	"github.com/kxj/gos3/internal/auth"
 	"github.com/kxj/gos3/internal/config"
+	"github.com/kxj/gos3/internal/iam"
 	"github.com/kxj/gos3/internal/store"
 )
 
 type Server struct {
 	api     *api.Handler
-	creds   *auth.Store
+	iam     *iam.Store
 	logger  *slog.Logger
 	handler http.Handler
 }
 
-func New(cfg config.Config, st store.Store, creds *auth.Store, logger *slog.Logger) *Server {
+func New(cfg config.Config, st store.Store, iamStore *iam.Store, logger *slog.Logger) *Server {
 	s := &Server{
 		api: &api.Handler{
-			Store:   st,
-			Region:  cfg.Region,
-			OwnerID: cfg.OwnerID,
-			Logger:  logger,
+			Store:    st,
+			IAM:      iamStore,
+			Region:   cfg.Region,
+			OwnerID:  cfg.OwnerID,
+			RootUser: cfg.RootUser,
+			RootPass: cfg.RootPass,
+			Logger:   logger,
 		},
-		creds:  creds,
+		iam:    iamStore,
 		logger: logger,
 	}
 	s.handler = s.middleware(http.HandlerFunc(s.route), cfg.MaxSkew)
@@ -38,6 +41,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
+	if s.api.ServeAdmin(w, r) {
+		return
+	}
 	if isPublicPath(r.URL.Path) {
 		s.api.Health(w, r)
 		return
@@ -64,6 +70,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			switch {
+			case query.Has("lifecycle"):
+				s.api.GetBucketLifecycle(w, r, bucket)
+				return
 			case query.Has("versions"):
 				s.api.ListObjectVersions(w, r, bucket)
 				return
@@ -73,14 +82,22 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			}
 			s.api.ListObjects(w, r, bucket)
 		case http.MethodPut:
-			if query.Has("versioning") {
+			switch {
+			case query.Has("versioning"):
 				s.api.SetBucketVersioning(w, r, bucket)
+				return
+			case query.Has("lifecycle"):
+				s.api.SetBucketLifecycle(w, r, bucket)
 				return
 			}
 			s.api.CreateBucket(w, r, bucket)
 		case http.MethodHead:
 			s.api.HeadBucket(w, r, bucket)
 		case http.MethodDelete:
+			if query.Has("lifecycle") {
+				s.api.DeleteBucketLifecycle(w, r, bucket)
+				return
+			}
 			s.api.DeleteBucket(w, r, bucket)
 		case http.MethodPost:
 			if query.Has("delete") {
@@ -135,5 +152,74 @@ func isPublicPath(path string) bool {
 	if path == "/healthz" {
 		return true
 	}
-	return strings.HasPrefix(path, "/minio/health/")
+	if strings.HasPrefix(path, "/minio/health/") {
+		return true
+	}
+	return strings.HasPrefix(path, "/gos3/admin/")
+}
+
+func actionAndResource(r *http.Request) (string, string) {
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		return "s3:ListAllMyBuckets", "*"
+	}
+	bucket, object, _ := strings.Cut(path, "/")
+	q := r.URL.Query()
+	if object == "" {
+		bucketRes := "arn:aws:s3:::" + bucket
+		switch r.Method {
+		case http.MethodGet:
+			switch {
+			case q.Has("lifecycle"):
+				return "s3:GetLifecycleConfiguration", bucketRes
+			case q.Has("versions"):
+				return "s3:ListBucketVersions", bucketRes
+			case q.Has("uploads"):
+				return "s3:ListBucketMultipartUploads", bucketRes
+			case q.Has("versioning"):
+				return "s3:GetBucketVersioning", bucketRes
+			case q.Has("location"):
+				return "s3:GetBucketLocation", bucketRes
+			default:
+				return "s3:ListBucket", bucketRes
+			}
+		case http.MethodHead:
+			return "s3:ListBucket", bucketRes
+		case http.MethodPut:
+			switch {
+			case q.Has("versioning"):
+				return "s3:PutBucketVersioning", bucketRes
+			case q.Has("lifecycle"):
+				return "s3:PutLifecycleConfiguration", bucketRes
+			default:
+				return "s3:CreateBucket", bucketRes
+			}
+		case http.MethodDelete:
+			if q.Has("lifecycle") {
+				return "s3:PutLifecycleConfiguration", bucketRes
+			}
+			return "s3:DeleteBucket", bucketRes
+		default:
+			return "s3:ListBucket", bucketRes
+		}
+	}
+	objRes := "arn:aws:s3:::" + bucket + "/" + object
+	switch r.Method {
+	case http.MethodPut:
+		return "s3:PutObject", objRes
+	case http.MethodGet:
+		if q.Has("uploadId") {
+			return "s3:ListMultipartUploadParts", objRes
+		}
+		return "s3:GetObject", objRes
+	case http.MethodHead:
+		return "s3:GetObject", objRes
+	case http.MethodDelete:
+		if q.Has("uploadId") {
+			return "s3:AbortMultipartUpload", objRes
+		}
+		return "s3:DeleteObject", objRes
+	default:
+		return "s3:PutObject", objRes
+	}
 }

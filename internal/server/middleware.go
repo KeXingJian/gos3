@@ -66,6 +66,12 @@ func (s *Server) auth(next http.Handler, skew time.Duration) http.Handler {
 			s.writeAuthError(w, r, err)
 			return
 		}
+		action, resource := actionAndResource(r)
+		if !s.iam.IsAllowed(res.Credentials.AccessKey, action, resource) {
+			s.logger.Warn("[gos3: access-denied]", "path", r.URL.Path, "access-key", res.Credentials.AccessKey, "action", action)
+			api.WriteError(w, r, api.ErrAccessDenied)
+			return
+		}
 		if res.Streaming {
 			r.Body = sign.NewChunkedReader(r.Body, res.SigningKey, res.Scope, res.AmzDate, res.Signature)
 			r.ContentLength = -1
@@ -76,10 +82,10 @@ func (s *Server) auth(next http.Handler, skew time.Duration) http.Handler {
 
 func (s *Server) authenticate(r *http.Request, skew time.Duration) (sign.Result, error) {
 	if r.Header.Get("Authorization") != "" {
-		return sign.VerifyHeader(r, s.creds, time.Now(), skew)
+		return sign.VerifyHeader(r, s.iam, time.Now(), skew)
 	}
 	if r.URL.Query().Get("X-Amz-Algorithm") != "" {
-		return sign.VerifyQuery(r, s.creds, time.Now(), 7*24*time.Hour)
+		return sign.VerifyQuery(r, s.iam, time.Now(), 7*24*time.Hour)
 	}
 	return sign.Result{}, sign.ErrMissingAuth
 }

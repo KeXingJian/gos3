@@ -25,6 +25,8 @@ type Config struct {
 	RootUser          string
 	RootPass          string
 	OwnerID           string
+	IAMDir            string
+	ScanInterval      time.Duration
 	MaxSkew           time.Duration
 	ReadHeaderTimeout time.Duration
 	ShutdownTimeout   time.Duration
@@ -38,6 +40,7 @@ func Default() Config {
 		RootUser:          envOr("GOS3_ROOT_USER", "minioadmin"),
 		RootPass:          envOr("GOS3_ROOT_PASSWORD", "minioadmin"),
 		OwnerID:           DefaultOwnerID,
+		ScanInterval:      time.Minute,
 		MaxSkew:           15 * time.Minute,
 		ReadHeaderTimeout: 10 * time.Second,
 		ShutdownTimeout:   10 * time.Second,

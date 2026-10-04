@@ -8,7 +8,7 @@ services:
         COMMIT: ${GOS3_COMMIT:-unknown}
         BUILDTIME: ${GOS3_BUILDTIME:-unknown}
     image: gos3:verify
-    command: ["server", "-address", ":9000", "/data/d1", "/data/d2", "/data/d3", "/data/d4"]
+    command: ["server", "-address", ":9000", "-scan-interval", "3s", "/data/d1", "/data/d2", "/data/d3", "/data/d4"]
     environment:
       GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
       GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}

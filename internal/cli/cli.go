@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/kxj/gos3/internal/cluster"
 	"github.com/kxj/gos3/internal/config"
 	"github.com/kxj/gos3/internal/disk"
+	"github.com/kxj/gos3/internal/iam"
 	"github.com/kxj/gos3/internal/server"
 	"github.com/kxj/gos3/internal/store"
 	"github.com/kxj/gos3/internal/version"
@@ -76,6 +78,7 @@ func runServer(args []string) int {
 	fs.IntVar(&cfg.ParityShards, "parity-shards", 0, "erasure parity shards (0 = auto)")
 	fs.StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "internode gRPC listen address")
 	fs.StringVar(&cfg.Advertise, "advertise", "", "gRPC address other nodes use to reach this node")
+	fs.DurationVar(&cfg.ScanInterval, "scan-interval", cfg.ScanInterval, "lifecycle scan interval")
 	peersFlag := fs.String("peers", "", "comma-separated peer gRPC addresses")
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -88,6 +91,9 @@ func runServer(args []string) int {
 	cfg.DataDirs = fs.Args()
 	cfg.DataDir = cfg.DataDirs[0]
 	cfg.Peers = splitPeers(*peersFlag)
+	if cfg.IAMDir == "" {
+		cfg.IAMDir = filepath.Join(cfg.DataDir, ".iam")
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -97,8 +103,13 @@ func runServer(args []string) int {
 		return 1
 	}
 	defer stopStore()
-	creds := auth.NewStore(auth.Credentials{AccessKey: cfg.RootUser, SecretKey: cfg.RootPass})
-	srv := server.New(cfg, st, creds, logger)
+
+	iamStore, err := iam.New(cfg.IAMDir, auth.Credentials{AccessKey: cfg.RootUser, SecretKey: cfg.RootPass}, logger)
+	if err != nil {
+		logger.Error("[gos3: iam-init-failed]", "error", err.Error())
+		return 1
+	}
+	srv := server.New(cfg, st, iamStore, logger)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Address,
@@ -110,6 +121,7 @@ func runServer(args []string) int {
 	defer stop()
 
 	go cleanupLoop(ctx, st, logger)
+	go lifecycleLoop(ctx, st, logger, cfg.ScanInterval)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -225,6 +237,55 @@ func splitPeers(s string) []string {
 		}
 	}
 	return out
+}
+
+func lifecycleLoop(ctx context.Context, st store.Store, logger *slog.Logger, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runLifecycle(ctx, st, logger)
+		}
+	}
+}
+
+func runLifecycle(ctx context.Context, st store.Store, logger *slog.Logger) {
+	buckets, err := st.ListBuckets(ctx)
+	if err != nil {
+		return
+	}
+	for _, b := range buckets {
+		cfg, err := st.GetBucketLifecycle(ctx, b.Name)
+		if err != nil || len(cfg.Rules) == 0 {
+			continue
+		}
+		marker := ""
+		for {
+			res, err := st.ListObjects(ctx, b.Name, store.ListOptions{MaxKeys: 1000, Marker: marker})
+			if err != nil {
+				break
+			}
+			now := time.Now().UTC()
+			for _, obj := range res.Objects {
+				if !cfg.Expired(obj.Name, obj.ModTime, now) {
+					continue
+				}
+				if _, err := st.DeleteObject(ctx, b.Name, obj.Name, ""); err == nil {
+					logger.Info("[gos3: lifecycle-expire]", "bucket", b.Name, "object", obj.Name)
+				}
+			}
+			if !res.IsTruncated || res.NextMarker == "" {
+				break
+			}
+			marker = res.NextMarker
+		}
+	}
 }
 
 func cleanupLoop(ctx context.Context, st store.Store, logger *slog.Logger) {

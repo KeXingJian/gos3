@@ -18,6 +18,7 @@ import (
 
 	"github.com/kxj/gos3/internal/disk"
 	"github.com/kxj/gos3/internal/erasure"
+	"github.com/kxj/gos3/internal/lifecycle"
 )
 
 type Erasure struct {
@@ -205,6 +206,72 @@ func (e *Erasure) SetBucketVersioning(ctx context.Context, bucket, status string
 		return fmt.Errorf("versioning write quorum not reached (%d/%d)", ok, e.dataShards)
 	}
 	e.log.Info("[gos3: erasure-set-bucket-versioning]", "bucket", bucket, "status", status)
+	return nil
+}
+
+func (e *Erasure) GetBucketLifecycle(ctx context.Context, bucket string) (lifecycle.Configuration, error) {
+	if !validBucketName(bucket) {
+		return lifecycle.Configuration{}, ErrInvalidBucketName
+	}
+	if _, ok, err := e.BucketExists(ctx, bucket); err != nil {
+		return lifecycle.Configuration{}, err
+	} else if !ok {
+		return lifecycle.Configuration{}, ErrBucketNotFound
+	}
+	var lastErr error
+	for _, d := range e.disks {
+		data, err := d.ReadFile(ctx, diskLifecyclePath(bucket))
+		if errors.Is(err, disk.ErrNotExist) {
+			return lifecycle.Configuration{}, ErrNoLifecycleConfig
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var cfg lifecycle.Configuration
+		if json.Unmarshal(data, &cfg) == nil {
+			return cfg, nil
+		}
+	}
+	if lastErr != nil {
+		return lifecycle.Configuration{}, lastErr
+	}
+	return lifecycle.Configuration{}, ErrNoLifecycleConfig
+}
+
+func (e *Erasure) SetBucketLifecycle(ctx context.Context, bucket string, cfg lifecycle.Configuration) error {
+	if _, ok, err := e.BucketExists(ctx, bucket); err != nil {
+		return err
+	} else if !ok {
+		return ErrBucketNotFound
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	ok := 0
+	for _, d := range e.disks {
+		if err := d.WriteFile(ctx, diskLifecyclePath(bucket), data); err == nil {
+			ok++
+		}
+	}
+	if ok < e.dataShards {
+		return fmt.Errorf("lifecycle write quorum not reached (%d/%d)", ok, e.dataShards)
+	}
+	e.log.Info("[gos3: erasure-set-bucket-lifecycle]", "bucket", bucket, "rules", len(cfg.Rules))
+	return nil
+}
+
+func (e *Erasure) DeleteBucketLifecycle(ctx context.Context, bucket string) error {
+	if _, err := e.GetBucketLifecycle(ctx, bucket); err != nil {
+		return err
+	}
+	for _, d := range e.disks {
+		_ = d.DeleteFile(ctx, diskLifecyclePath(bucket))
+	}
 	return nil
 }
 
@@ -845,6 +912,10 @@ func diskBucketMetaDir(bucket string) string {
 
 func diskBucketConfigPath(bucket string) string {
 	return path.Join(metaDir, bucket, bucketConfigFile)
+}
+
+func diskLifecyclePath(bucket string) string {
+	return path.Join(metaDir, bucket, ".lifecycle.json")
 }
 
 func diskDataPath(bucket, object, versionID string) string {

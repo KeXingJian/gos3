@@ -30,7 +30,8 @@
 - 纠删码为整对象内存编码（非流式分块），超大对象受内存与 gRPC 消息上限（128MiB）限制。
 - 版本控制分页仅支持 key-marker；无 MFA-delete。
 - 分布式为静态成员、无分布式锁/leader；不做并发写同一 key 的协调。
-- IAM、生命周期、事件通知。
+- IAM 为单节点状态、管理 API 走明文 Basic Auth；生命周期仅支持 Expiration。
+- 事件通知未实现。
 - 流式签名的 **Trailer 变体**（`STREAMING-...-TRAILER`）：仅支持标准流式 chunk。
 - 虚拟主机风格（virtual-host style）寻址：仅支持 path-style。
 
@@ -139,9 +140,19 @@ gos3/
 - [ ] 分布式锁 / leader 选举（当前假设无并发写冲突）
 - [ ] 流式分块纠删码（当前整对象内存编码，限制 gRPC 消息 128MiB）
 
+### M6 · IAM + 生命周期（已完成 ✅）
+
+- [x] IAM：用户（accessKey/secretKey/status）、策略存储（users.json / policies.json）
+- [x] AWS 风格策略 JSON：Effect Allow/Deny、Action/Resource 通配、Deny 优先、默认拒绝
+- [x] 请求 → action/resource 映射；SigV4 认证后做鉴权
+- [x] 管理 API（root Basic Auth）：users / policies / attach / detach
+- [x] 生命周期：桶配置 `GET/PUT/DELETE ?lifecycle`，Expiration（Days/Date）
+- [x] 后台扫描器（`-scan-interval`）过期删除对象
+- [x] Docker 验证：只读用户读成功/写被拒；生命周期到期删除
+- [ ] 分布式 IAM 复制、组、STS、LDAP/OIDC（见 README 限制）
+
 ### 后续里程碑（占位）
 
-- [ ] M6 IAM / 生命周期
 - [ ] M7 OTel / slog 增强 / 构造器注入重构
 
 ---

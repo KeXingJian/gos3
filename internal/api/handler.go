@@ -11,14 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kxj/gos3/internal/iam"
+	"github.com/kxj/gos3/internal/lifecycle"
 	"github.com/kxj/gos3/internal/store"
 )
 
 type Handler struct {
-	Store   store.Store
-	Region  string
-	OwnerID string
-	Logger  *slog.Logger
+	Store    store.Store
+	IAM      *iam.Store
+	Region   string
+	OwnerID  string
+	RootUser string
+	RootPass string
+	Logger   *slog.Logger
 }
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
@@ -424,6 +429,49 @@ func (h *Handler) ListObjectVersions(w http.ResponseWriter, r *http.Request, buc
 		out.CommonPrefixes = append(out.CommonPrefixes, commonPrefix{Prefix: p})
 	}
 	writeXML(w, http.StatusOK, out)
+}
+
+func (h *Handler) GetBucketLifecycle(w http.ResponseWriter, r *http.Request, bucket string) {
+	cfg, err := h.Store.GetBucketLifecycle(r.Context(), bucket)
+	if err != nil {
+		if errors.Is(err, store.ErrNoLifecycleConfig) {
+			WriteError(w, r, ErrNoSuchLifecycleConfiguration)
+			return
+		}
+		h.writeStoreError(w, r, err)
+		return
+	}
+	cfg.Xmlns = s3Namespace
+	writeXML(w, http.StatusOK, cfg)
+}
+
+func (h *Handler) SetBucketLifecycle(w http.ResponseWriter, r *http.Request, bucket string) {
+	var cfg lifecycle.Configuration
+	if err := xml.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		WriteError(w, r, ErrInvalidLifecycle)
+		return
+	}
+	if err := h.Store.SetBucketLifecycle(r.Context(), bucket, cfg); err != nil {
+		if errors.Is(err, lifecycle.ErrInvalidExpiration) {
+			WriteError(w, r, ErrInvalidLifecycle)
+			return
+		}
+		h.writeStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) DeleteBucketLifecycle(w http.ResponseWriter, r *http.Request, bucket string) {
+	if err := h.Store.DeleteBucketLifecycle(r.Context(), bucket); err != nil {
+		if errors.Is(err, store.ErrNoLifecycleConfig) {
+			WriteError(w, r, ErrNoSuchLifecycleConfiguration)
+			return
+		}
+		h.writeStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func normalizeMax(value string) int {

@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kxj/gos3/internal/lifecycle"
 )
 
 const (
@@ -272,6 +274,58 @@ func (f *FS) SetBucketVersioning(ctx context.Context, bucket, status string) err
 	}
 	f.log.Info("[gos3: set-bucket-versioning]", "bucket", bucket, "status", status)
 	return nil
+}
+
+func (f *FS) lifecyclePath(bucket string) string {
+	return filepath.Join(f.bucketMetaDir(bucket), ".lifecycle.json")
+}
+
+func (f *FS) GetBucketLifecycle(ctx context.Context, bucket string) (lifecycle.Configuration, error) {
+	if !validBucketName(bucket) {
+		return lifecycle.Configuration{}, ErrInvalidBucketName
+	}
+	if _, ok, err := f.BucketExists(ctx, bucket); err != nil {
+		return lifecycle.Configuration{}, err
+	} else if !ok {
+		return lifecycle.Configuration{}, ErrBucketNotFound
+	}
+	var cfg lifecycle.Configuration
+	if err := readJSONFile(f.lifecyclePath(bucket), &cfg); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return lifecycle.Configuration{}, ErrNoLifecycleConfig
+		}
+		return lifecycle.Configuration{}, err
+	}
+	return cfg, nil
+}
+
+func (f *FS) SetBucketLifecycle(ctx context.Context, bucket string, cfg lifecycle.Configuration) error {
+	if _, ok, err := f.BucketExists(ctx, bucket); err != nil {
+		return err
+	} else if !ok {
+		return ErrBucketNotFound
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := writeJSONFile(f.lifecyclePath(bucket), cfg); err != nil {
+		return err
+	}
+	f.log.Info("[gos3: set-bucket-lifecycle]", "bucket", bucket, "rules", len(cfg.Rules))
+	return nil
+}
+
+func (f *FS) DeleteBucketLifecycle(ctx context.Context, bucket string) error {
+	if _, ok, err := f.BucketExists(ctx, bucket); err != nil {
+		return err
+	} else if !ok {
+		return ErrBucketNotFound
+	}
+	err := os.Remove(f.lifecyclePath(bucket))
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNoLifecycleConfig
+	}
+	return err
 }
 
 func (f *FS) PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (ObjectInfo, error) {

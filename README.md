@@ -13,6 +13,8 @@ A minimal, S3-compatible object storage server written in Go, built as a learnin
 - Erasure coding across N drives (Reed-Solomon), write/read quorum, recovery from drive loss
 - Distributed clusters: drives on peer nodes accessed over **gRPC + protobuf**; a whole node can
   fail and objects remain readable (reconstructed from parity shards on survivors)
+- IAM: users, AWS-style JSON policies, per-request action/resource authorization
+- Lifecycle: bucket lifecycle rules with Expiration (Days/Date) and a background scanner
 - AWS Signature V4: header signing, presigned URLs, streaming chunk signatures
 - Versioned JSON metadata (`<root>/.meta/<bucket>/<object>.json` holds a list of versions),
   with per-version data under `<root>/.data/<bucket>/<object>/<versionId>`
@@ -57,12 +59,35 @@ mc rb local/demo
 
 Health endpoints: `GET /healthz`, `GET /minio/health/live`, `GET /minio/health/ready`.
 
+## IAM (users, policies, authorization)
+
+The root credential has full access. Additional users and AWS-style JSON policies are managed
+through a small admin API guarded by HTTP Basic auth with the root credentials:
+
+```sh
+ADMIN=http://127.0.0.1:19000/gos3/admin
+curl -u minioadmin:minioadmin -X PUT "$ADMIN/users?accessKey=alice&secretKey=alice123"
+curl -u minioadmin:minioadmin -X PUT --data-binary @readonly.json "$ADMIN/policies?name=readonly"
+curl -u minioadmin:minioadmin -X PUT "$ADMIN/attach?accessKey=alice&policy=readonly"
+```
+
+Each S3 request is mapped to an action (e.g. `s3:GetObject`) and resource
+(`arn:aws:s3:::bucket/key`) and checked against the user's policies; explicit `Deny` wins,
+default is deny. Endpoints: `users`, `policies`, `attach`, `detach` (`/gos3/admin/...`).
+
+## Lifecycle
+
+Lifecycle rules are managed through the standard S3 API (`GET/PUT/DELETE /bucket?lifecycle`),
+e.g. with `mc ilm rule add --expire-days 30 myminio/bucket`. A background scanner
+(`-scan-interval`, default `1m`) lists objects per bucket and deletes those matching an
+enabled `Expiration` (by `Days` or `Date`).
+
 ## Verify with Docker
 
 Builds a static server image and runs an end-to-end suite (`mc` + `curl`) against it.
 The suite checks SigV4, bucket/object CRUD, listing, multipart upload integrity,
 presigned URLs, anonymous denial, error cases, erasure recovery after simulated
-drive loss, and object versioning (27 checks).
+drive loss, object versioning, IAM authorization, and lifecycle expiration (32 checks).
 
 ```sh
 make verify-docker
@@ -138,7 +163,9 @@ sequenceDiagram
 | `internal/erasure` | Reed-Solomon encode/decode (`klauspost/reedsolomon`) |
 | `internal/disk` | `Disk` abstraction: `Local` (filesystem) and `Remote` (gRPC), plus generated proto |
 | `internal/cluster` | gRPC disk service, peer discovery, global drive assembly |
-| `internal/api` | S3 handlers, XML responses, error model |
+| `internal/iam` | Users, policies, credentials provider, authorization evaluation |
+| `internal/lifecycle` | Lifecycle configuration model and expiration evaluation |
+| `internal/api` | S3 handlers, admin API, XML responses, error model |
 | `internal/server` | Router and middleware chain |
 | `internal/version` | Version info injected via ldflags |
 
@@ -153,6 +180,10 @@ sequenceDiagram
   so data must be read back with the same layout.
 - Cluster membership is static (flags), with no distributed lock/leader election; concurrent writes
   to the same key from different nodes are not coordinated.
+- IAM state is stored per node and not replicated across the cluster; the admin API uses HTTP Basic
+  over plaintext (use it on a trusted network or behind TLS).
+- Lifecycle supports only `Expiration` (Days/Date); no transitions, noncurrent-version expiration,
+  or tag/size filters.
 - Multipart staging lives on the first global drive only; the assembled object is erasure-coded on completion.
 - Composite multipart ETag is `md5(concat(part md5s))-N`; no server-side checksum verification of the assembled body.
 - Minimum part size (5 MiB except the last) is not enforced yet.

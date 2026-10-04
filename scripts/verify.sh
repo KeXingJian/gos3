@@ -150,6 +150,50 @@ if mc version suspend "$ALIAS/$VBUCKET" >/dev/null 2>&1; then ok "versioning sus
 mc rm --recursive --force --versions "$ALIAS/$VBUCKET" >/dev/null 2>&1 || true
 mc rb --force "$ALIAS/$VBUCKET" >/dev/null 2>&1 || true
 
+ADMIN="http://gos3:9000/gos3/admin"
+IBUCKET="$BUCKET-iam"
+mc rb --force "$ALIAS/$IBUCKET" >/dev/null 2>&1 || true
+mc mb "$ALIAS/$IBUCKET" >/dev/null 2>&1
+mc cp "$WORK/small.txt" "$ALIAS/$IBUCKET/hello.txt" >/dev/null 2>&1
+
+curl -s -u minioadmin:minioadmin -X PUT "$ADMIN/users?accessKey=alice&secretKey=alice123" >/dev/null
+cat >"$WORK/ro.json" <<EOF
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket","s3:ListAllMyBuckets"],"Resource":["arn:aws:s3:::$IBUCKET","arn:aws:s3:::$IBUCKET/*","*"]}]}
+EOF
+curl -s -u minioadmin:minioadmin -X PUT --data-binary @"$WORK/ro.json" "$ADMIN/policies?name=readonly" >/dev/null
+curl -s -u minioadmin:minioadmin -X PUT "$ADMIN/attach?accessKey=alice&policy=readonly" >/dev/null
+
+mc alias set alice http://gos3:9000 alice alice123 >/dev/null 2>&1
+check "iam read allowed" "hello gos3" "$(mc cat alice/$IBUCKET/hello.txt 2>/dev/null)"
+if mc cp "$WORK/small.txt" "alice/$IBUCKET/denied.txt" >/dev/null 2>&1; then
+  bad "iam write denied"
+else
+  ok "iam write denied"
+fi
+
+LBUCKET="$BUCKET-life"
+mc rb --force "$ALIAS/$LBUCKET" >/dev/null 2>&1 || true
+mc mb "$ALIAS/$LBUCKET" >/dev/null 2>&1
+mc cp "$WORK/small.txt" "$ALIAS/$LBUCKET/expire.txt" >/dev/null 2>&1
+if mc ilm rule add --expire-days 1 "$ALIAS/$LBUCKET" >/dev/null 2>&1; then ok "lifecycle rule add"; else bad "lifecycle rule add"; fi
+if mc ilm rule ls "$ALIAS/$LBUCKET" 2>/dev/null | grep -qi 'enabled'; then ok "lifecycle rule listed"; else bad "lifecycle rule listed"; fi
+
+OLDTS="$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+for d in d1 d2 d3 d4; do
+  f="/data/$d/.meta/$LBUCKET/expire.txt.json"
+  [ -f "$f" ] && sed -i "s/\"modTime\":\"[^\"]*\"/\"modTime\":\"$OLDTS\"/" "$f"
+done
+sleep 7
+if mc ls "$ALIAS/$LBUCKET/" 2>/dev/null | grep -q 'expire.txt'; then
+  bad "lifecycle expiration deletes object"
+else
+  ok "lifecycle expiration deletes object"
+fi
+
+curl -s -u minioadmin:minioadmin -X DELETE "$ADMIN/users?accessKey=alice" >/dev/null
+mc rb --force "$ALIAS/$IBUCKET" >/dev/null 2>&1 || true
+mc rb --force "$ALIAS/$LBUCKET" >/dev/null 2>&1 || true
+
 echo
 echo "== result: $PASS passed, $FAIL failed =="
 if [ "$FAIL" -gt 0 ]; then

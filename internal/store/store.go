@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"time"
+
+	"github.com/kxj/gos3/internal/lifecycle"
 )
 
 var (
@@ -23,6 +25,7 @@ var (
 	ErrNoSuchVersion     = errors.New("no such version")
 	ErrDeleteMarker      = errors.New("object is a delete marker")
 	ErrInvalidVersioning = errors.New("invalid versioning status")
+	ErrNoLifecycleConfig = errors.New("no lifecycle configuration")
 )
 
 const (
@@ -114,6 +117,10 @@ type Store interface {
 
 	GetBucketVersioning(ctx context.Context, bucket string) (string, error)
 	SetBucketVersioning(ctx context.Context, bucket, status string) error
+
+	GetBucketLifecycle(ctx context.Context, bucket string) (lifecycle.Configuration, error)
+	SetBucketLifecycle(ctx context.Context, bucket string, cfg lifecycle.Configuration) error
+	DeleteBucketLifecycle(ctx context.Context, bucket string) error
 
 	PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (ObjectInfo, error)
 	GetObject(ctx context.Context, bucket, object, versionID string) (io.ReadSeekCloser, ObjectInfo, error)
