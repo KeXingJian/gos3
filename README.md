@@ -105,7 +105,8 @@ A self-contained single-page console is embedded with `go:embed` and served at `
 (open <http://127.0.0.1:19000/ui>). It signs in with the root credentials over HTTP Basic and
 talks to the JSON admin API (`/gos3/admin/buckets`, `/users`, `/policies`), so the browser does
 not need to implement SigV4. Features: bucket list/create/delete, object list (prefix/delimiter),
-upload/download/delete, user add/remove, policy save/attach.
+upload/download/delete, share (presigned GET URL, via `/gos3/admin/presign`), user add/remove,
+policy save/attach.
 
 It is plain HTML/CSS/JS with no build step and no Node toolchain; the file lives at
 `internal/api/ui/index.html`.
@@ -172,7 +173,7 @@ sequenceDiagram
     participant H as api.Handler
     participant S as store.FS
     C->>MW: PUT /bucket/key (SigV4)
-    MW->>MW: verify signature; unwrap streaming chunks
+    MW->>MW: verify signature & unwrap streaming chunks
     MW->>H: PutObject
     H->>S: PutObject(reader)
     S->>S: write temp + md5, rename, write meta.json
