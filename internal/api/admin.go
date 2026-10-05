@@ -32,6 +32,8 @@ func (h *Handler) ServeAdmin(w http.ResponseWriter, r *http.Request) bool {
 		h.adminAttach(w, r)
 	case p == "/gos3/admin/detach":
 		h.adminDetach(w, r)
+	case p == "/gos3/admin/presign":
+		h.adminPresign(w, r)
 	case strings.HasPrefix(p, "/gos3/admin/buckets"):
 		h.serveAdminBuckets(w, r, strings.TrimPrefix(p, "/gos3/admin/buckets"))
 	default:

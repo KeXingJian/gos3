@@ -16,7 +16,7 @@ services:
     ports:
       - "${GOS3_PORT:-19000}:9000"
     volumes:
-      - gos3-data:/data
+      - ./data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
       interval: 2s
@@ -24,22 +24,19 @@ services:
       retries: 30
       start_period: 3s
 
-  verify:
-    build:
-      context: .
-      target: verify
-    image: gos3-verify:local
-    depends_on:
-      gos3:
-        condition: service_healthy
-    environment:
-      S3_ENDPOINT: http://gos3:9000
-      S3_USER: ${GOS3_ROOT_USER:-minioadmin}
-      S3_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
-      ERASURE_DRIVES: "4"
-    volumes:
-      - gos3-data:/data
-    restart: "no"
-
-volumes:
-  gos3-data:
+#  verify:
+#    build:
+#      context: .
+#      target: verify
+#    image: gos3-verify:local
+#    depends_on:
+#      gos3:
+#        condition: service_healthy
+#    environment:
+#      S3_ENDPOINT: http://gos3:9000
+#      S3_USER: ${GOS3_ROOT_USER:-minioadmin}
+#      S3_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+#      ERASURE_DRIVES: "4"
+#    volumes:
+#      - ./data:/data
+#    restart: "no"

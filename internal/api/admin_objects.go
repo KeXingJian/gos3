@@ -7,8 +7,45 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kxj/gos3/internal/auth"
+	"github.com/kxj/gos3/internal/sign"
 	"github.com/kxj/gos3/internal/store"
 )
+
+const maxPresignExpiry = 7 * 24 * 3600
+
+func (h *Handler) adminPresign(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	bucket := q.Get("bucket")
+	object := q.Get("object")
+	if bucket == "" || object == "" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bucket and object are required"})
+		return
+	}
+	expires := 3600
+	if v := q.Get("expires"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			expires = n
+		}
+	}
+	if expires < 1 {
+		expires = 3600
+	}
+	if expires > maxPresignExpiry {
+		expires = maxPresignExpiry
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	creds := auth.Credentials{AccessKey: h.RootUser, SecretKey: h.RootPass}
+	link := sign.PresignGetURL(scheme, r.Host, "/"+bucket+"/"+object, creds, h.Region, time.Now(), time.Duration(expires)*time.Second)
+	writeJSONStatus(w, http.StatusOK, map[string]any{"url": link, "expires": expires})
+}
 
 func (h *Handler) serveAdminBuckets(w http.ResponseWriter, r *http.Request, rest string) {
 	if rest == "" || rest == "/" {
