@@ -19,6 +19,7 @@ services:
     environment:
       GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
       GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+      GOS3_OTEL_EXPORTER: stdout
     volumes:
       - node1-data:/data
     healthcheck:
@@ -48,6 +49,7 @@ services:
     environment:
       GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
       GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+      GOS3_OTEL_EXPORTER: stdout
     volumes:
       - node2-data:/data
     healthcheck:

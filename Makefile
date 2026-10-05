@@ -32,6 +32,7 @@ verify-docker:
 	docker compose build
 	docker compose up -d --wait gos3
 	docker compose run --rm verify
+	@docker compose logs gos3 2>&1 | grep -q 'HTTP GET' && echo "PASS otel: HTTP span exported" || (echo "FAIL otel: no HTTP span"; docker compose logs gos3 2>&1 | tail -30; exit 1)
 	docker compose down -v
 
 verify-dist:
@@ -39,6 +40,7 @@ verify-dist:
 	docker compose -f docker-compose.dist.yml build
 	docker compose -f docker-compose.dist.yml up -d --wait node1 node2
 	docker compose -f docker-compose.dist.yml run --rm --no-deps -e PHASE=write verify
+	@docker compose -f docker-compose.dist.yml logs node1 node2 2>&1 | grep -q 'DiskService' && echo "PASS otel: gRPC span exported" || (echo "FAIL otel: no gRPC span"; exit 1)
 	docker compose -f docker-compose.dist.yml stop node1
 	docker compose -f docker-compose.dist.yml run --rm --no-deps -e PHASE=read -e S3_ENDPOINT=http://node2:9000 verify
 	docker compose -f docker-compose.dist.yml down -v

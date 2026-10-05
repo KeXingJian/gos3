@@ -12,6 +12,7 @@ services:
     environment:
       GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
       GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
+      GOS3_OTEL_EXPORTER: ${GOS3_OTEL_EXPORTER:-stdout}
     ports:
       - "${GOS3_PORT:-19000}:9000"
     volumes:

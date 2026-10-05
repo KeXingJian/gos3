@@ -12,7 +12,7 @@
 | 项目名 / 二进制 | `gos3` | 直白，学习项目 |
 | module path | `github.com/kxj/gos3`（可改） | 后续可 push |
 | Go 版本 | 1.24（与宿主机一致） | 可用 `log/slog`、`errors.Join`、`http.ServeContent` 等 |
-| 外部依赖 | **M1–M2 零依赖，纯标准库** | 先吃透标准库，避免依赖干扰 |
+| 外部依赖 | 仅 reedsolomon / grpc / protobuf / otel | 以标准库为主，必要时引入成熟库 |
 | 节点间通信 | **gRPC + protobuf**（M5 分布式阶段引入） | 简历通用技能 |
 | 对象元数据 | **sidecar JSON**（`<root>/.meta/<bucket>/<object>.json`） | 可读可调试，贴近学习目标 |
 | 数据存储 | 本地文件系统，`<root>/<bucket>/<object>` | 最小闭环 |
@@ -22,7 +22,7 @@
 | 路由 | 自研轻量路由（不用 `ServeMux`，避免路径清洗破坏签名） | 保留原始路径 |
 | 配置 | flag 优先 + 环境变量兜底 | `GOS3_ROOT_USER` / `GOS3_ROOT_PASSWORD` |
 | 日志 | 标准库 `log/slog` | 结构化日志 |
-| 本次范围 | **M1–M2**：骨架 + 基础 S3 + SigV4，可用 `mc` 操作 | 见下文 |
+| 进度 | **M0–M7 已完成**：S3 + 版本控制 + 纠删码 + gRPC 分布式 + IAM + 生命周期 + 可观测性 | 见下文 |
 
 ### 明确不做（本阶段）
 
@@ -151,9 +151,20 @@ gos3/
 - [x] Docker 验证：只读用户读成功/写被拒；生命周期到期删除
 - [ ] 分布式 IAM 复制、组、STS、LDAP/OIDC（见 README 限制）
 
-### 后续里程碑（占位）
+### M7 · 可观测性 / 现代化（已完成 ✅）
 
-- [ ] M7 OTel / slog 增强 / 构造器注入重构
+- [x] `internal/telemetry`：OTel TracerProvider（stdout / OTLP 可选），W3C TraceContext 传播
+- [x] HTTP 中间件 `HTTP <METHOD>` span（含方法/路径/状态码），提取上游 traceparent
+- [x] gRPC 客户端/服务端 stats handler（`otelgrpc`）→ `/disk.DiskService/*` span
+- [x] 存储层 span：`erasure.PutObject` / `erasure.GetObject`
+- [x] slog 上下文增强：`ContextHandler` 自动注入 `trace_id`/`span_id`；访问日志用 `InfoContext`
+- [x] 构造器注入：无包级全局状态（各子系统经构造函数装配）
+- [x] Docker 验证：单机校验 HTTP span、分布式校验 gRPC span
+- [ ] Prometheus 指标 / 审计日志 / OTel metrics（未做）
+
+### 里程碑完成
+
+M0–M7 均已完成。后续可选方向：分布式 IAM 复制、事件通知、流式分块纠删码、Prometheus 指标。
 
 ---
 

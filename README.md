@@ -3,7 +3,8 @@
 A minimal, S3-compatible object storage server written in Go, built as a learning project.
 
 > Goal: understand Go and object storage by rebuilding a small slice of MinIO.
-> Scope (M1–M2): single-node filesystem backend, AWS SigV4 auth, basic S3 API.
+> Scope: S3 API, SigV4, object versioning, Reed-Solomon erasure coding, gRPC distributed
+> clusters, IAM authorization, lifecycle expiration, and OpenTelemetry tracing.
 
 ## Features
 
@@ -15,13 +16,16 @@ A minimal, S3-compatible object storage server written in Go, built as a learnin
   fail and objects remain readable (reconstructed from parity shards on survivors)
 - IAM: users, AWS-style JSON policies, per-request action/resource authorization
 - Lifecycle: bucket lifecycle rules with Expiration (Days/Date) and a background scanner
+- Observability: OpenTelemetry tracing (HTTP + gRPC + storage) and context-aware `slog`
+  (`trace_id`/`span_id` on request logs)
 - AWS Signature V4: header signing, presigned URLs, streaming chunk signatures
 - Versioned JSON metadata (`<root>/.meta/<bucket>/<object>.json` holds a list of versions),
   with per-version data under `<root>/.data/<bucket>/<object>/<versionId>`
 - Multipart staging under `<root>/.multipart/<bucket>/<uploadId>/` with stale-upload cleanup
 - Range requests and conditional requests via `http.ServeContent`
 - Graceful shutdown, structured logging (`log/slog`), request IDs
-- External dependencies: `klauspost/reedsolomon`, `google.golang.org/grpc`, `google.golang.org/protobuf`
+- External dependencies: `klauspost/reedsolomon`, `google.golang.org/grpc`, `google.golang.org/protobuf`,
+  `go.opentelemetry.io/otel` (+ `otelgrpc`)
 
 ## Build & Run
 
@@ -81,6 +85,17 @@ Lifecycle rules are managed through the standard S3 API (`GET/PUT/DELETE /bucket
 e.g. with `mc ilm rule add --expire-days 30 myminio/bucket`. A background scanner
 (`-scan-interval`, default `1m`) lists objects per bucket and deletes those matching an
 enabled `Expiration` (by `Days` or `Date`).
+
+## Observability
+
+- Logs use `log/slog`; the HTTP access log and traced operations carry `trace_id`/`span_id`
+  (via a context-aware `slog.Handler`).
+- OpenTelemetry spans are created for HTTP requests (`HTTP <METHOD>`), gRPC disk RPCs
+  (`/disk.DiskService/*`, server + client), and storage `erasure.PutObject`/`GetObject`.
+- Exporter selection via environment:
+  - `GOS3_OTEL_EXPORTER=stdout` — print spans as JSON (default in `docker-compose.yml`)
+  - `GOS3_OTEL_EXPORTER=otlp` + `GOS3_OTEL_ENDPOINT=host:4317` — send to an OTLP collector
+  - unset — tracing disabled
 
 ## Verify with Docker
 
@@ -165,6 +180,7 @@ sequenceDiagram
 | `internal/cluster` | gRPC disk service, peer discovery, global drive assembly |
 | `internal/iam` | Users, policies, credentials provider, authorization evaluation |
 | `internal/lifecycle` | Lifecycle configuration model and expiration evaluation |
+| `internal/telemetry` | OpenTelemetry setup (stdout/OTLP) and context-aware slog handler |
 | `internal/api` | S3 handlers, admin API, XML responses, error model |
 | `internal/server` | Router and middleware chain |
 | `internal/version` | Version info injected via ldflags |

@@ -21,6 +21,7 @@ import (
 	"github.com/kxj/gos3/internal/iam"
 	"github.com/kxj/gos3/internal/server"
 	"github.com/kxj/gos3/internal/store"
+	"github.com/kxj/gos3/internal/telemetry"
 	"github.com/kxj/gos3/internal/version"
 )
 
@@ -95,7 +96,20 @@ func runServer(args []string) int {
 		cfg.IAMDir = filepath.Join(cfg.DataDir, ".iam")
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(telemetry.ContextHandler{
+		Handler: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
+	})
+
+	shutdownTelemetry, err := telemetry.Setup(context.Background(), "gos3", version.Version)
+	if err != nil {
+		logger.Error("[gos3: telemetry-init-failed]", "error", err.Error())
+		return 1
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
 
 	st, stopStore, err := buildStore(cfg, logger)
 	if err != nil {

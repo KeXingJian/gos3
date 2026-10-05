@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kxj/gos3/internal/disk"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -47,6 +48,7 @@ func Build(ctx context.Context, opts Options) (*Cluster, error) {
 		return nil, fmt.Errorf("grpc listen %s: %w", opts.Listen, err)
 	}
 	gs := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.MaxRecvMsgSize(maxMessageSize),
 		grpc.MaxSendMsgSize(maxMessageSize),
 	)
@@ -104,6 +106,7 @@ func dialPeer(ctx context.Context, peer string, timeout time.Duration, log *slog
 		}
 		conn, err := grpc.NewClient(peer,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 			grpc.WithDefaultCallOptions(
 				grpc.MaxCallRecvMsgSize(maxMessageSize),
 				grpc.MaxCallSendMsgSize(maxMessageSize),

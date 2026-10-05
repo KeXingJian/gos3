@@ -19,6 +19,9 @@ import (
 	"github.com/kxj/gos3/internal/disk"
 	"github.com/kxj/gos3/internal/erasure"
 	"github.com/kxj/gos3/internal/lifecycle"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Erasure struct {
@@ -287,6 +290,10 @@ func (e *Erasure) PutObject(ctx context.Context, bucket, object string, data io.
 	} else if !ok {
 		return ObjectInfo{}, ErrBucketNotFound
 	}
+	ctx, span := otel.Tracer("gos3/store").Start(ctx, "erasure.PutObject",
+		trace.WithAttributes(attribute.String("bucket", bucket), attribute.String("object", object)))
+	defer span.End()
+
 	state, err := e.GetBucketVersioning(ctx, bucket)
 	if err != nil {
 		return ObjectInfo{}, err
@@ -317,6 +324,10 @@ func (e *Erasure) GetObject(ctx context.Context, bucket, object, versionID strin
 	if !validObjectName(object) {
 		return nil, ObjectInfo{}, ErrInvalidObjectName
 	}
+	ctx, span := otel.Tracer("gos3/store").Start(ctx, "erasure.GetObject",
+		trace.WithAttributes(attribute.String("bucket", bucket), attribute.String("object", object)))
+	defer span.End()
+
 	meta, err := e.readMetaAny(ctx, bucket, object)
 	if err != nil {
 		return nil, ObjectInfo{}, err

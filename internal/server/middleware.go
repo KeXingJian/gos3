@@ -9,6 +9,11 @@ import (
 
 	"github.com/kxj/gos3/internal/api"
 	"github.com/kxj/gos3/internal/sign"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func (s *Server) middleware(next http.Handler, skew time.Duration) http.Handler {
@@ -17,7 +22,30 @@ func (s *Server) middleware(next http.Handler, skew time.Duration) http.Handler 
 	h = s.accessLog(h)
 	h = s.requestID(h)
 	h = s.recoverer(h)
+	h = s.tracing(h)
 	return h
+}
+
+func (s *Server) tracing(next http.Handler) http.Handler {
+	tracer := otel.Tracer("gos3/http")
+	propagator := otel.GetTextMapPropagator()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := tracer.Start(ctx, "HTTP "+r.Method, trace.WithSpanKind(trace.SpanKindServer))
+		defer span.End()
+
+		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r.WithContext(ctx))
+
+		span.SetAttributes(
+			attribute.String("http.request.method", r.Method),
+			attribute.String("url.path", r.URL.Path),
+			attribute.Int("http.response.status_code", rw.status),
+		)
+		if rw.status >= http.StatusInternalServerError {
+			span.SetStatus(codes.Error, http.StatusText(rw.status))
+		}
+	})
 }
 
 func (s *Server) recoverer(next http.Handler) http.Handler {
@@ -45,7 +73,7 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
-		s.logger.Info("[gos3: request]",
+		s.logger.InfoContext(r.Context(), "[gos3: request]",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rw.status,
