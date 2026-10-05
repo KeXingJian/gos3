@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gos3 console</title>
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --line:#2a3550; --fg:#e6ebf5; --mut:#8b97b0; --acc:#4c8bf5; --ok:#3bb273; --err:#e5534b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:12px 20px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; }
+  header b { color:var(--acc); }
+  #login { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  input,button,textarea,select { background:#0d1220; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
+  button { cursor:pointer; background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.ghost { background:transparent; color:var(--fg); }
+  button.danger { background:var(--err); border-color:var(--err); }
+  nav { display:flex; gap:4px; padding:10px 20px 0; }
+  nav button { background:transparent; border:none; color:var(--mut); padding:8px 12px; border-bottom:2px solid transparent; }
+  nav button.active { color:var(--fg); border-bottom-color:var(--acc); }
+  main { padding:16px 20px 60px; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .grid { display:grid; grid-template-columns:260px 1fr; gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  ul.list { list-style:none; margin:0; padding:0; max-height:60vh; overflow:auto; }
+  ul.list li { padding:6px 8px; border-radius:6px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
+  ul.list li:hover { background:#1e2740; }
+  ul.list li.sel { background:#22304f; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--mut); font-weight:600; }
+  code { color:var(--mut); }
+  #status { color:var(--mut); margin-left:12px; }
+  #status.err { color:var(--err); }
+  #status.ok { color:var(--ok); }
+  .muted { color:var(--mut); }
+  .right { margin-left:auto; display:flex; gap:6px; }
+</style>
+</head>
+<body>
+<header>
+  <b>gos3</b><span class="muted">console</span>
+  <div id="login">
+    <input id="user" placeholder="access key" value="minioadmin" autocomplete="username">
+    <input id="pass" type="password" placeholder="secret key" value="minioadmin" autocomplete="current-password">
+    <button onclick="connect()">Connect</button>
+  </div>
+</header>
+
+<nav>
+  <button data-tab="buckets" class="active" onclick="tab('buckets')">Buckets</button>
+  <button data-tab="users" onclick="tab('users')">Users</button>
+  <button data-tab="policies" onclick="tab('policies')">Policies</button>
+  <span id="status"></span>
+</nav>
+
+<main>
+  <section id="tab-buckets" class="panel active">
+    <div class="row">
+      <input id="newBucket" placeholder="new bucket name">
+      <button onclick="createBucket()">Create bucket</button>
+      <button class="ghost" onclick="loadBuckets()">Refresh</button>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px">Buckets</div>
+        <ul id="bucketList" class="list"></ul>
+      </div>
+      <div class="card">
+        <div class="row">
+          <b id="bucketTitle">no bucket selected</b>
+          <button class="ghost right" onclick="deleteBucket()">Delete bucket</button>
+        </div>
+        <div class="row">
+          <input id="prefix" placeholder="prefix">
+          <input id="delimiter" placeholder="delimiter" value="/" style="width:90px">
+          <button onclick="loadObjects()">List</button>
+          <input id="file" type="file" multiple onchange="uploadFiles()">
+        </div>
+        <table>
+          <thead><tr><th>Key</th><th>Size</th><th>ETag</th><th>Modified</th><th></th></tr></thead>
+          <tbody id="objectRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-users" class="panel">
+    <div class="row">
+      <input id="uAccess" placeholder="access key">
+      <input id="uSecret" placeholder="secret key">
+      <input id="uPolicy" placeholder="policy name (optional)">
+      <button onclick="addUser()">Add user</button>
+      <button class="ghost" onclick="loadUsers()">Refresh</button>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>Access key</th><th>Status</th><th>Policies</th><th></th></tr></thead>
+        <tbody id="userRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-policies" class="panel">
+    <div class="row">
+      <input id="pName" placeholder="policy name">
+      <button onclick="savePolicy()">Save policy</button>
+      <button class="ghost" onclick="loadPolicies()">Refresh</button>
+    </div>
+    <div class="card">
+      <textarea id="pBody" rows="10" style="width:100%" spellcheck="false">{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":["arn:aws:s3:::demo","arn:aws:s3:::demo/*"]}]}</textarea>
+      <div id="policyList" class="row" style="margin-top:10px"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+let creds = null;
+let currentBucket = null;
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.textContent = msg || '';
+  el.className = cls || '';
+}
+
+function basic() {
+  return creds ? 'Basic ' + btoa(creds.user + ':' + creds.pass) : '';
+}
+
+async function api(method, path, body, raw) {
+  const headers = {};
+  if (creds) headers['Authorization'] = basic();
+  if (body && !raw) headers['Content-Type'] = 'application/json';
+  const res = await fetch(path, { method, headers, body });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(method + ' ' + path + ' -> ' + res.status + ' ' + t.slice(0, 160));
+  }
+  const ct = res.headers.get('content-type') || '';
+  return ct.indexOf('json') >= 0 ? res.json() : res.text();
+}
+
+async function connect() {
+  creds = { user: document.getElementById('user').value, pass: document.getElementById('pass').value };
+  try {
+    await api('GET', '/gos3/admin/buckets');
+    setStatus('connected as ' + creds.user, 'ok');
+    loadBuckets(); loadUsers(); loadPolicies();
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+function tab(name) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+}
+
+function enc(key) { return key.split('/').map(encodeURIComponent).join('/'); }
+
+async function loadBuckets() {
+  try {
+    const buckets = await api('GET', '/gos3/admin/buckets');
+    const ul = document.getElementById('bucketList');
+    ul.innerHTML = '';
+    buckets.forEach(b => {
+      const li = document.createElement('li');
+      li.textContent = b.name;
+      li.className = b.name === currentBucket ? 'sel' : '';
+      li.onclick = () => selectBucket(b.name);
+      ul.appendChild(li);
+    });
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+function selectBucket(name) {
+  currentBucket = name;
+  document.getElementById('bucketTitle').textContent = name;
+  loadBuckets(); loadObjects();
+}
+
+async function createBucket() {
+  const name = document.getElementById('newBucket').value.trim();
+  if (!name) return;
+  try { await api('PUT', '/gos3/admin/buckets?name=' + encodeURIComponent(name)); setStatus('bucket created', 'ok'); loadBuckets(); }
+  catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function deleteBucket() {
+  if (!currentBucket) return;
+  try {
+    await api('DELETE', '/gos3/admin/buckets/' + encodeURIComponent(currentBucket));
+    setStatus('bucket deleted', 'ok'); currentBucket = null;
+    document.getElementById('bucketTitle').textContent = 'no bucket selected';
+    loadBuckets(); document.getElementById('objectRows').innerHTML = '';
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function loadObjects() {
+  if (!currentBucket) return;
+  const p = document.getElementById('prefix').value;
+  const d = document.getElementById('delimiter').value;
+  try {
+    const res = await api('GET', '/gos3/admin/buckets/' + encodeURIComponent(currentBucket) +
+      '/objects?prefix=' + encodeURIComponent(p) + '&delimiter=' + encodeURIComponent(d));
+    const tb = document.getElementById('objectRows');
+    tb.innerHTML = '';
+    (res.prefixes || []).forEach(pr => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td><code>' + pr + '</code></td><td colspan="4" class="muted">prefix</td>';
+      tb.appendChild(tr);
+    });
+    (res.objects || []).forEach(o => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + o.key + '</td><td>' + o.size + '</td><td><code>' + o.etag.slice(0, 12) + '</code></td><td class="muted">' + o.modified + '</td>';
+      const td = document.createElement('td');
+      const dl = document.createElement('button'); dl.className = 'ghost'; dl.textContent = 'Download'; dl.onclick = () => downloadObject(o.key);
+      const del = document.createElement('button'); del.className = 'danger'; del.textContent = 'Delete'; del.onclick = () => deleteObject(o.key);
+      td.appendChild(dl); td.appendChild(del);
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    });
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function uploadFiles() {
+  if (!currentBucket) { setStatus('select a bucket first', 'err'); return; }
+  const files = document.getElementById('file').files;
+  for (const f of files) {
+    try {
+      await api('PUT', '/gos3/admin/buckets/' + encodeURIComponent(currentBucket) + '/objects/' + enc(f.name), f, true);
+      setStatus('uploaded ' + f.name, 'ok');
+    } catch (e) { setStatus(String(e.message || e), 'err'); }
+  }
+  document.getElementById('file').value = '';
+  loadObjects();
+}
+
+async function downloadObject(key) {
+  try {
+    const res = await fetch('/gos3/admin/buckets/' + encodeURIComponent(currentBucket) + '/objects/' + enc(key), { headers: { Authorization: basic() } });
+    if (!res.ok) throw new Error('download failed ' + res.status);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = key.split('/').pop();
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function deleteObject(key) {
+  try {
+    await api('DELETE', '/gos3/admin/buckets/' + encodeURIComponent(currentBucket) + '/objects/' + enc(key));
+    setStatus('deleted ' + key, 'ok'); loadObjects();
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function loadUsers() {
+  try {
+    const users = await api('GET', '/gos3/admin/users');
+    const tb = document.getElementById('userRows');
+    tb.innerHTML = '';
+    (users || []).forEach(u => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + u.accessKey + '</td><td>' + u.status + '</td><td>' + (u.policies || []).join(', ') + '</td>';
+      const td = document.createElement('td');
+      const rm = document.createElement('button'); rm.className = 'danger'; rm.textContent = 'Remove';
+      rm.onclick = async () => {
+        try { await api('DELETE', '/gos3/admin/users?accessKey=' + encodeURIComponent(u.accessKey)); setStatus('user removed', 'ok'); loadUsers(); }
+        catch (e) { setStatus(String(e.message || e), 'err'); }
+      };
+      td.appendChild(rm); tr.appendChild(td); tb.appendChild(tr);
+    });
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function addUser() {
+  const ak = document.getElementById('uAccess').value.trim();
+  const sk = document.getElementById('uSecret').value.trim();
+  const pol = document.getElementById('uPolicy').value.trim();
+  if (!ak || !sk) { setStatus('access + secret required', 'err'); return; }
+  try {
+    await api('PUT', '/gos3/admin/users?accessKey=' + encodeURIComponent(ak) + '&secretKey=' + encodeURIComponent(sk));
+    if (pol) await api('PUT', '/gos3/admin/attach?accessKey=' + encodeURIComponent(ak) + '&policy=' + encodeURIComponent(pol));
+    setStatus('user saved', 'ok');
+    document.getElementById('uAccess').value = ''; document.getElementById('uSecret').value = '';
+    loadUsers();
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function loadPolicies() {
+  try {
+    const names = await api('GET', '/gos3/admin/policies');
+    const el = document.getElementById('policyList');
+    el.innerHTML = '';
+    (names || []).forEach(n => {
+      const b = document.createElement('button'); b.className = 'ghost'; b.textContent = n;
+      b.onclick = async () => { try { setStatus('policy ' + n + ' (edit JSON and Save to update)', 'ok'); } catch (e) {} };
+      el.appendChild(b);
+    });
+    if (!names || !names.length) el.innerHTML = '<span class="muted">no policies</span>';
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function savePolicy() {
+  const name = document.getElementById('pName').value.trim();
+  if (!name) { setStatus('policy name required', 'err'); return; }
+  try {
+    JSON.parse(document.getElementById('pBody').value);
+    await api('PUT', '/gos3/admin/policies?name=' + encodeURIComponent(name), document.getElementById('pBody').value);
+    setStatus('policy saved', 'ok'); loadPolicies();
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+connect();
+</script>
+</body>
+</html>

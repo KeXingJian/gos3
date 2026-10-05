@@ -18,6 +18,8 @@ A minimal, S3-compatible object storage server written in Go, built as a learnin
 - Lifecycle: bucket lifecycle rules with Expiration (Days/Date) and a background scanner
 - Observability: OpenTelemetry tracing (HTTP + gRPC + storage) and context-aware `slog`
   (`trace_id`/`span_id` on request logs)
+- Embedded web console at `/ui` (single HTML+JS via `go:embed`): bucket/object browser and
+  user/policy management
 - AWS Signature V4: header signing, presigned URLs, streaming chunk signatures
 - Versioned JSON metadata (`<root>/.meta/<bucket>/<object>.json` holds a list of versions),
   with per-version data under `<root>/.data/<bucket>/<object>/<versionId>`
@@ -97,12 +99,24 @@ enabled `Expiration` (by `Days` or `Date`).
   - `GOS3_OTEL_EXPORTER=otlp` + `GOS3_OTEL_ENDPOINT=host:4317` — send to an OTLP collector
   - unset — tracing disabled
 
+## Console (web UI)
+
+A self-contained single-page console is embedded with `go:embed` and served at `/ui`
+(open <http://127.0.0.1:19000/ui>). It signs in with the root credentials over HTTP Basic and
+talks to the JSON admin API (`/gos3/admin/buckets`, `/users`, `/policies`), so the browser does
+not need to implement SigV4. Features: bucket list/create/delete, object list (prefix/delimiter),
+upload/download/delete, user add/remove, policy save/attach.
+
+It is plain HTML/CSS/JS with no build step and no Node toolchain; the file lives at
+`internal/api/ui/index.html`.
+
 ## Verify with Docker
 
 Builds a static server image and runs an end-to-end suite (`mc` + `curl`) against it.
 The suite checks SigV4, bucket/object CRUD, listing, multipart upload integrity,
 presigned URLs, anonymous denial, error cases, erasure recovery after simulated
-drive loss, object versioning, IAM authorization, and lifecycle expiration (32 checks).
+drive loss, object versioning, IAM authorization, lifecycle expiration, and the embedded console
+(35 checks).
 
 ```sh
 make verify-docker
@@ -181,7 +195,7 @@ sequenceDiagram
 | `internal/iam` | Users, policies, credentials provider, authorization evaluation |
 | `internal/lifecycle` | Lifecycle configuration model and expiration evaluation |
 | `internal/telemetry` | OpenTelemetry setup (stdout/OTLP) and context-aware slog handler |
-| `internal/api` | S3 handlers, admin API, XML responses, error model |
+| `internal/api` | S3 handlers, admin API, embedded console, XML responses, error model |
 | `internal/server` | Router and middleware chain |
 | `internal/version` | Version info injected via ldflags |
 

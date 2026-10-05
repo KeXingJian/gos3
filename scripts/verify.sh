@@ -171,6 +171,15 @@ else
   ok "iam write denied"
 fi
 
+UI_CODE="$(curl -s -o /dev/null -w '%{http_code}' http://gos3:9000/ui)"
+check "console UI served" "200" "$UI_CODE"
+if curl -s http://gos3:9000/ui | grep -qi 'gos3 console'; then ok "console UI content"; else bad "console UI content"; fi
+if curl -s -u minioadmin:minioadmin "http://gos3:9000/gos3/admin/buckets" | grep -q '"name"'; then
+  ok "console admin buckets API"
+else
+  bad "console admin buckets API"
+fi
+
 LBUCKET="$BUCKET-life"
 mc rb --force "$ALIAS/$LBUCKET" >/dev/null 2>&1 || true
 mc mb "$ALIAS/$LBUCKET" >/dev/null 2>&1

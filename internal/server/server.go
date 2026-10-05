@@ -44,6 +44,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	if s.api.ServeAdmin(w, r) {
 		return
 	}
+	if s.api.ServeUI(w, r) {
+		return
+	}
 	if isPublicPath(r.URL.Path) {
 		s.api.Health(w, r)
 		return
@@ -155,7 +158,10 @@ func isPublicPath(path string) bool {
 	if strings.HasPrefix(path, "/minio/health/") {
 		return true
 	}
-	return strings.HasPrefix(path, "/gos3/admin/")
+	if strings.HasPrefix(path, "/gos3/admin/") {
+		return true
+	}
+	return path == "/ui" || path == "/ui/"
 }
 
 func actionAndResource(r *http.Request) (string, string) {

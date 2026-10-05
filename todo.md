@@ -160,6 +160,7 @@ gos3/
 - [x] slog 上下文增强：`ContextHandler` 自动注入 `trace_id`/`span_id`；访问日志用 `InfoContext`
 - [x] 构造器注入：无包级全局状态（各子系统经构造函数装配）
 - [x] Docker 验证：单机校验 HTTP span、分布式校验 gRPC span
+- [x] 方案B 内嵌控制台：`go:embed` 单页（`/ui`）+ `/gos3/admin/buckets` JSON 接口
 - [ ] Prometheus 指标 / 审计日志 / OTel metrics（未做）
 
 ### 里程碑完成

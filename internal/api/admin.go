@@ -22,15 +22,18 @@ func (h *Handler) ServeAdmin(w http.ResponseWriter, r *http.Request) bool {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "iam not configured"})
 		return true
 	}
-	switch r.URL.Path {
-	case "/gos3/admin/users":
+	p := r.URL.Path
+	switch {
+	case p == "/gos3/admin/users":
 		h.adminUsers(w, r)
-	case "/gos3/admin/policies":
+	case p == "/gos3/admin/policies":
 		h.adminPolicies(w, r)
-	case "/gos3/admin/attach":
+	case p == "/gos3/admin/attach":
 		h.adminAttach(w, r)
-	case "/gos3/admin/detach":
+	case p == "/gos3/admin/detach":
 		h.adminDetach(w, r)
+	case strings.HasPrefix(p, "/gos3/admin/buckets"):
+		h.serveAdminBuckets(w, r, strings.TrimPrefix(p, "/gos3/admin/buckets"))
 	default:
 		http.NotFound(w, r)
 	}
