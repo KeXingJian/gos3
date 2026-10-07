@@ -20,8 +20,11 @@ services:
       GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
       GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
       GOS3_OTEL_EXPORTER: stdout
+    ports:
+      - "${GOS3_NODE1_PORT:-19000}:9000"
+      - "${GOS3_NODE1_GRPC_PORT:-19001}:9001"
     volumes:
-      - node1-data:/data
+      - .node1-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
       interval: 2s
@@ -50,8 +53,11 @@ services:
       GOS3_ROOT_USER: ${GOS3_ROOT_USER:-minioadmin}
       GOS3_ROOT_PASSWORD: ${GOS3_ROOT_PASSWORD:-minioadmin}
       GOS3_OTEL_EXPORTER: stdout
+    ports:
+      - "${GOS3_NODE2_PORT:-19002}:9000"
+      - "${GOS3_NODE2_GRPC_PORT:-19003}:9001"
     volumes:
-      - node2-data:/data
+      - .node2-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
       interval: 2s

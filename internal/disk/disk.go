@@ -22,6 +22,8 @@ type Entry struct {
 	IsDir bool
 }
 
+// Disk 是存储层的磁盘抽象：屏蔽本地目录(Local)与远程节点(Remote)的差异，
+// 使纠删码存储层无需关心某个分片究竟落在本机还是别的节点上。
 type Disk interface {
 	ID() string
 	ReadFile(ctx context.Context, path string) ([]byte, error)

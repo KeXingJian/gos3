@@ -66,6 +66,7 @@ type fsPartMeta struct {
 	ModTime    time.Time `json:"modTime"`
 }
 
+// toInfo 把内部版本记录 fsVersion 转换为对外返回的 ObjectInfo。
 func (v fsVersion) toInfo(bucket, object string) ObjectInfo {
 	return ObjectInfo{
 		Bucket:       bucket,
@@ -1146,6 +1147,8 @@ func removeVersion(versions []fsVersion, versionID string) []fsVersion {
 	return out
 }
 
+// assignVersionID 依据 bucket 的版本控制状态分配版本号：
+// 开启版本控制时生成随机版本号，否则返回常量 "null"。
 func assignVersionID(state string) (string, error) {
 	if state == VersioningEnabled {
 		return newVersionID()

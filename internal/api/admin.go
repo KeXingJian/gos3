@@ -10,6 +10,16 @@ import (
 	"github.com/kxj/gos3/internal/iam"
 )
 
+// ServeAdmin 分发管理接口 /gos3/admin/*。统一使用 HTTP Basic（仅 root）鉴权。
+// 路由表：
+//   - GET|PUT|DELETE /gos3/admin/users        用户管理
+//   - GET|PUT|DELETE /gos3/admin/policies     策略管理
+//   - PUT            /gos3/admin/attach       给用户绑定策略
+//   - PUT            /gos3/admin/detach       解绑策略
+//   - GET            /gos3/admin/presign      生成预签名下载 URL
+//   - /gos3/admin/buckets...                  管理端 bucket/object 操作
+//
+// 命中该前缀即返回 true（表示已处理）。
 func (h *Handler) ServeAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if !strings.HasPrefix(r.URL.Path, "/gos3/admin/") {
 		return false
@@ -42,11 +52,16 @@ func (h *Handler) ServeAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// adminAuthorized 校验管理接口的 Basic 认证，仅认 root 账号。
 func (h *Handler) adminAuthorized(r *http.Request) bool {
 	user, pass, ok := r.BasicAuth()
 	return ok && user == h.RootUser && pass == h.RootPass
 }
 
+// adminUsers 用户管理。
+//   - GET    /gos3/admin/users                              列出所有用户
+//   - PUT    /gos3/admin/users?accessKey=&secretKey=[&status=]  新增/覆盖用户
+//   - DELETE /gos3/admin/users?accessKey=                   删除用户
 func (h *Handler) adminUsers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -78,6 +93,10 @@ func (h *Handler) adminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// adminPolicies 策略管理。
+//   - GET    /gos3/admin/policies           列出所有策略名
+//   - PUT    /gos3/admin/policies?name=     新增/覆盖策略（请求体为策略 JSON）
+//   - DELETE /gos3/admin/policies?name=     删除策略
 func (h *Handler) adminPolicies(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -110,6 +129,8 @@ func (h *Handler) adminPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// adminAttach 给指定用户绑定一条策略。
+// PUT /gos3/admin/attach?accessKey=&policy=
 func (h *Handler) adminAttach(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -123,6 +144,8 @@ func (h *Handler) adminAttach(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// adminDetach 解除指定用户的某条策略绑定。
+// PUT /gos3/admin/detach?accessKey=&policy=
 func (h *Handler) adminDetach(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)

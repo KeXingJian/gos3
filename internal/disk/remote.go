@@ -9,12 +9,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Remote 表示另一个节点上的一块磁盘：所有操作都通过 gRPC 转发到对端，
+// 由对端的 disk.Server 落到真实的本地磁盘上。实现 Disk 接口。
 type Remote struct {
 	id     string
 	drive  int32
 	client DiskServiceClient
 }
 
+// NewRemote 基于到对端的 gRPC 连接 cc 创建远程磁盘。
+// id 为磁盘标识；drive 是对端节点内的磁盘下标，用于在服务端定位具体磁盘。
 func NewRemote(id string, cc grpc.ClientConnInterface, drive int) *Remote {
 	return &Remote{id: id, drive: int32(drive), client: NewDiskServiceClient(cc)}
 }

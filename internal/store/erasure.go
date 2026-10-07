@@ -278,6 +278,9 @@ func (e *Erasure) DeleteBucketLifecycle(ctx context.Context, bucket string) erro
 	return nil
 }
 
+// PutObject 写入对象（纠删码后端入口）。
+// 流程：校验名称/bucket -> 读取版本控制状态并分配 versionID ->
+// 读入完整数据 -> 交给 putBytes 编码落盘 -> 未开启版本控制时对外隐藏 versionID。
 func (e *Erasure) PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (ObjectInfo, error) {
 	if !validBucketName(bucket) {
 		return ObjectInfo{}, ErrInvalidBucketName
@@ -294,6 +297,7 @@ func (e *Erasure) PutObject(ctx context.Context, bucket, object string, data io.
 		trace.WithAttributes(attribute.String("bucket", bucket), attribute.String("object", object)))
 	defer span.End()
 
+	// 依据 bucket 的版本控制状态决定版本号
 	state, err := e.GetBucketVersioning(ctx, bucket)
 	if err != nil {
 		return ObjectInfo{}, err
@@ -302,15 +306,18 @@ func (e *Erasure) PutObject(ctx context.Context, bucket, object string, data io.
 	if err != nil {
 		return ObjectInfo{}, err
 	}
+	// 一次性读入对象全部字节（当前实现非流式）
 	raw, err := io.ReadAll(data)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
+	// 交给纠删码写路径：etag 用内容 md5；replaceNull 表示覆盖旧的 "null" 版本
 	info, err := e.putBytes(ctx, bucket, object, versionID, raw, contentType, userMeta, md5hex(raw), versionID == NullVersionID)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
 	e.log.Info("[gos3: erasure-put-object]", "bucket", bucket, "object", object, "version", versionID, "size", info.Size)
+	// 未开启版本控制时，不向客户端暴露内部使用的 "null" 版本号
 	if state == VersioningDisabled {
 		info.VersionID = ""
 	}
@@ -584,6 +591,10 @@ func (e *Erasure) ListObjectParts(ctx context.Context, bucket, object, uploadID 
 	return parts, nil
 }
 
+// CompleteMultipartUpload 合并分片为最终对象（纠删码后端）。
+// 流程：读取上传元数据 -> 校验分片号顺序与各分片 ETag ->
+// 按序拼接所有分片并计算复合 ETag -> 交给 putBytes 编码落盘 ->
+// 删除上传临时目录。复合 ETag 格式为 <各分片md5拼接后再md5>-<分片数>。
 func (e *Erasure) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []CompletePart) (ObjectInfo, error) {
 	if !validBucketName(bucket) {
 		return ObjectInfo{}, ErrInvalidBucketName
@@ -594,6 +605,7 @@ func (e *Erasure) CompleteMultipartUpload(ctx context.Context, bucket, object, u
 	if !validUploadID(uploadID) {
 		return ObjectInfo{}, ErrInvalidUploadID
 	}
+	// 读取本次上传的元数据（类型、用户元数据、是否开启版本控制）
 	upload, err := e.readUploadMeta(ctx, bucket, uploadID)
 	if err != nil {
 		return ObjectInfo{}, err
@@ -601,6 +613,7 @@ func (e *Erasure) CompleteMultipartUpload(ctx context.Context, bucket, object, u
 	if len(parts) == 0 {
 		return ObjectInfo{}, ErrInvalidPart
 	}
+	// 分片号必须严格递增
 	for i := 1; i < len(parts); i++ {
 		if parts[i].PartNumber <= parts[i-1].PartNumber {
 			return ObjectInfo{}, ErrInvalidPartOrder
@@ -613,6 +626,7 @@ func (e *Erasure) CompleteMultipartUpload(ctx context.Context, bucket, object, u
 		if part.PartNumber < 1 || part.PartNumber > 10000 {
 			return ObjectInfo{}, ErrInvalidPart
 		}
+		// 分片数据目前只从第一块盘读取（分片临时文件存于 disks[0]）
 		partBytes, err := e.disks[0].ReadFile(ctx, diskPartPath(bucket, uploadID, part.PartNumber))
 		if err != nil {
 			if errors.Is(err, disk.ErrNotExist) {
@@ -620,14 +634,17 @@ func (e *Erasure) CompleteMultipartUpload(ctx context.Context, bucket, object, u
 			}
 			return ObjectInfo{}, err
 		}
+		// 校验客户端提供的 ETag 与该分片内容 md5 是否一致
 		sum := md5.Sum(partBytes)
 		if part.ETag != "" && !strings.EqualFold(stripQuotes(part.ETag), hex.EncodeToString(sum[:])) {
 			return ObjectInfo{}, ErrInvalidPart
 		}
+		// 复合 ETag：把各分片 md5 二进制拼起来再取 md5
 		composite.Write(sum[:])
 		buf.Write(partBytes)
 	}
 
+	// 开启版本控制则分配新版本号，否则使用 "null"
 	versionID := NullVersionID
 	if upload.VersioningEnabled {
 		versionID, err = newVersionID()
@@ -636,10 +653,12 @@ func (e *Erasure) CompleteMultipartUpload(ctx context.Context, bucket, object, u
 		}
 	}
 	etag := hex.EncodeToString(composite.Sum(nil)) + "-" + strconv.Itoa(len(parts))
+	// 与普通上传共用 putBytes 写路径（纠删码编码 + 分片落盘 + 元数据落盘）
 	info, err := e.putBytes(ctx, bucket, object, versionID, buf.Bytes(), upload.ContentType, upload.UserMetadata, etag, versionID == NullVersionID)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
+	// 合并成功后清理分片上传临时目录
 	_ = e.disks[0].DeleteDir(ctx, diskUploadDir(bucket, uploadID))
 	e.log.Info("[gos3: erasure-complete-multipart]", "bucket", bucket, "object", object, "version", versionID, "size", info.Size)
 	return info, nil
@@ -717,35 +736,54 @@ func (e *Erasure) CleanupStaleUploads(ctx context.Context, olderThan time.Durati
 	return removed, nil
 }
 
+// putBytes 是纠删码后端的核心写路径：把一个完整对象编码成分片并落盘，
+// 再写入元数据完成提交。被 PutObject（erasure.go:309）与
+// CompleteMultipartUpload（erasure.go:639）复用。
+//
+// 参数：
+//   - versionID:   目标版本号（未开启版本控制时为 NullVersionID="null"）
+//   - raw:         对象完整字节（已由调用方读入内存）
+//   - contentType/userMeta: 对象类型与用户元数据
+//   - etag:        对象 ETag
+//   - replaceNull: 是否覆盖已有的 "null" 版本（未开启版本控制时的覆盖语义）
+//
+// 返回：写入成功的对象信息 ObjectInfo。
 func (e *Erasure) putBytes(ctx context.Context, bucket, object, versionID string, raw []byte, contentType string, userMeta map[string]string, etag string, replaceNull bool) (ObjectInfo, error) {
+	// 1) 读取该对象已有的元数据（任一磁盘）；不存在则视为新建，用零值 meta 继续
 	meta, err := e.readMetaAny(ctx, bucket, object)
 	if err != nil && !errors.Is(err, ErrObjectNotFound) {
 		return ObjectInfo{}, err
 	}
+	// 2) 非版本控制覆盖：先移除旧的 "null" 版本及其分片数据
 	if replaceNull {
 		meta = e.dropVersion(ctx, bucket, object, meta, NullVersionID)
 	}
 
+	// 3) 纠删码编码：把 raw 切成 dataShards 份数据分片，并计算 parityShards 份校验分片
 	shards, err := e.encoder.Encode(raw)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
+	// 4) 逐盘写入分片：第 i 个分片 -> 第 i 块盘
 	written := 0
 	for i, shard := range shards {
 		if i >= len(e.disks) {
 			break
 		}
 		if err := e.disks[i].WriteFile(ctx, diskDataPath(bucket, object, versionID), shard); err != nil {
+			// 单盘写失败只告警，不中断，靠 quorum 判定整体是否成功
 			e.log.Warn("[gos3: erasure-write-shard-failed]", "disk", e.disks[i].ID(), "error", err.Error())
 			continue
 		}
 		written++
 	}
+	// 5) 写法定人数：成功分片数必须 >= dataShards，否则回滚已写分片并报错
 	if written < e.dataShards {
 		e.removeVersionData(ctx, bucket, object, versionID)
 		return ObjectInfo{}, fmt.Errorf("write quorum not reached (%d/%d shards)", written, e.dataShards)
 	}
 
+	// 6) 组装新版本信息，并插入到版本列表头部（最新在前）
 	version := fsVersion{
 		VersionID:    versionID,
 		Size:         int64(len(raw)),
@@ -756,12 +794,16 @@ func (e *Erasure) putBytes(ctx context.Context, bucket, object, versionID string
 	}
 	meta.Name = object
 	meta.Versions = append([]fsVersion{version}, meta.Versions...)
+	// 7) 元数据冗余写入所有磁盘，同样要求达到 dataShards 的 quorum
 	if err := e.writeMetaAll(ctx, bucket, object, meta); err != nil {
 		return ObjectInfo{}, err
 	}
+	// 8) 转为对外 ObjectInfo 返回
 	return version.toInfo(bucket, object), nil
 }
 
+// writeMetaAll 把对象元数据（json）写入所有磁盘，要求成功数 >= dataShards。
+// 元数据采用全盘冗余存储，读取时任取一份即可（见 readMetaAny）。
 func (e *Erasure) writeMetaAll(ctx context.Context, bucket, object string, meta fsMeta) error {
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -779,6 +821,7 @@ func (e *Erasure) writeMetaAll(ctx context.Context, bucket, object string, meta 
 	return nil
 }
 
+// writeOrRemoveMeta 根据是否还有版本决定写元数据还是从所有磁盘删除元数据文件。
 func (e *Erasure) writeOrRemoveMeta(ctx context.Context, bucket, object string, meta fsMeta) error {
 	if len(meta.Versions) == 0 {
 		for _, d := range e.disks {
@@ -789,6 +832,8 @@ func (e *Erasure) writeOrRemoveMeta(ctx context.Context, bucket, object string, 
 	return e.writeMetaAll(ctx, bucket, object, meta)
 }
 
+// dropVersion 从元数据中移除指定版本，并删除该版本在各磁盘上的分片数据。
+// 返回移除后的新 meta（不修改入参）。
 func (e *Erasure) dropVersion(ctx context.Context, bucket, object string, meta fsMeta, versionID string) fsMeta {
 	kept := make([]fsVersion, 0, len(meta.Versions))
 	for _, version := range meta.Versions {
@@ -802,12 +847,16 @@ func (e *Erasure) dropVersion(ctx context.Context, bucket, object string, meta f
 	return meta
 }
 
+// removeVersionData 删除某版本对象在每一块磁盘上的分片数据文件（忽略单盘错误）。
 func (e *Erasure) removeVersionData(ctx context.Context, bucket, object, versionID string) {
 	for _, d := range e.disks {
 		_ = d.DeleteFile(ctx, diskDataPath(bucket, object, versionID))
 	}
 }
 
+// readShards 从各磁盘读取某版本对象的分片。
+// 返回分片切片（缺失位置为 nil）以及成功读到的分片数量 present。
+// 供 GetObject 判断读 quorum（present >= dataShards）并交给 encoder.Decode。
 func (e *Erasure) readShards(ctx context.Context, bucket, object, versionID string) ([][]byte, int) {
 	shards := make([][]byte, e.encoder.Shards())
 	present := 0
@@ -825,6 +874,8 @@ func (e *Erasure) readShards(ctx context.Context, bucket, object, versionID stri
 	return shards, present
 }
 
+// readMetaAny 依次尝试各磁盘，返回第一份可读到的对象元数据。
+// 元数据全盘冗余，因此任一份即可；都失败时返回 ErrObjectNotFound。
 func (e *Erasure) readMetaAny(ctx context.Context, bucket, object string) (fsMeta, error) {
 	lastErr := error(ErrObjectNotFound)
 	for _, d := range e.disks {
@@ -913,6 +964,7 @@ func diskReadMeta(ctx context.Context, d disk.Disk, bucket, object string) (fsMe
 	return meta, nil
 }
 
+// diskMetaPath 返回对象元数据在单块磁盘上的路径：<metaDir>/<bucket>/<object>.json
 func diskMetaPath(bucket, object string) string {
 	return path.Join(metaDir, bucket, object+".json")
 }
@@ -929,6 +981,7 @@ func diskLifecyclePath(bucket string) string {
 	return path.Join(metaDir, bucket, ".lifecycle.json")
 }
 
+// diskDataPath 返回某版本对象分片在单块磁盘上的路径：<dataDir>/<bucket>/<object>/<versionID>
 func diskDataPath(bucket, object, versionID string) string {
 	return path.Join(dataDir, bucket, object, versionID)
 }

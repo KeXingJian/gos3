@@ -8,11 +8,14 @@ import (
 	"path/filepath"
 )
 
+// Local 表示一个本地磁盘（实际是一个本地目录），实现 Disk 接口。
 type Local struct {
 	id   string
 	root string
 }
 
+// NewLocal 创建一个本地磁盘：把 root 转成绝对路径并确保目录存在。
+// id 为磁盘标识（集群里形如 "<advertise>/<序号>"），用于日志与定位。
 func NewLocal(id, root string) (*Local, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {

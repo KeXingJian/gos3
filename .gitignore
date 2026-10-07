@@ -1,4 +1,6 @@
 /gos3
-/data
+.data
 *.test
 *.out
+.node1-data
+.node2-data

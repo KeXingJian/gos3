@@ -16,7 +16,7 @@ services:
     ports:
       - "${GOS3_PORT:-19000}:9000"
     volumes:
-      - ./data:/data
+      - ./.data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
       interval: 2s

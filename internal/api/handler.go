@@ -26,16 +26,24 @@ type Handler struct {
 	Logger   *slog.Logger
 }
 
+// Health 健康检查接口（公开，无需鉴权）。
+// GET /healthz、/minio/health/*
+// 响应：200 纯文本 "ok\n"
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, "ok\n")
 }
 
+// owner 返回 S3 响应中统一的 owner 信息（固定显示名 gos3）。
 func (h *Handler) owner() Owner {
 	return Owner{ID: h.OwnerID, DisplayName: "gos3"}
 }
 
+// ListBuckets 列出当前账号下的所有 bucket。
+// GET /
+// 权限：s3:ListAllMyBuckets
+// 响应：200 XML ListAllMyBucketsResult
 func (h *Handler) ListBuckets(w http.ResponseWriter, r *http.Request) {
 	buckets, err := h.Store.ListBuckets(r.Context())
 	if err != nil {
@@ -52,6 +60,10 @@ func (h *Handler) ListBuckets(w http.ResponseWriter, r *http.Request) {
 	writeXML(w, http.StatusOK, out)
 }
 
+// CreateBucket 创建 bucket。
+// PUT /{bucket}
+// 权限：s3:CreateBucket
+// 响应：200，Location 头为 /{bucket}
 func (h *Handler) CreateBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	_, _ = io.Copy(io.Discard, r.Body)
 	if err := h.Store.MakeBucket(r.Context(), bucket); err != nil {
@@ -62,6 +74,10 @@ func (h *Handler) CreateBucket(w http.ResponseWriter, r *http.Request, bucket st
 	w.WriteHeader(http.StatusOK)
 }
 
+// HeadBucket 判断 bucket 是否存在。
+// HEAD /{bucket}
+// 权限：s3:ListBucket
+// 响应：200（存在，带 x-amz-bucket-region）；不存在返回 404 NoSuchBucket
 func (h *Handler) HeadBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	created, ok, err := h.Store.BucketExists(r.Context(), bucket)
 	if err != nil {
@@ -77,6 +93,10 @@ func (h *Handler) HeadBucket(w http.ResponseWriter, r *http.Request, bucket stri
 	w.WriteHeader(http.StatusOK)
 }
 
+// DeleteBucket 删除空 bucket。
+// DELETE /{bucket}
+// 权限：s3:DeleteBucket
+// 响应：204；bucket 非空返回 409 BucketNotEmpty
 func (h *Handler) DeleteBucket(w http.ResponseWriter, r *http.Request, bucket string) {
 	if err := h.Store.DeleteBucket(r.Context(), bucket); err != nil {
 		h.writeStoreError(w, r, err)
@@ -85,6 +105,14 @@ func (h *Handler) DeleteBucket(w http.ResponseWriter, r *http.Request, bucket st
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ListObjects 列出 bucket 内对象，并复用该入口处理若干 bucket 级子资源查询。
+// GET /{bucket}
+//   - ?location      -> 返回 region（s3:GetBucketLocation）
+//   - ?versioning    -> 返回版本控制状态（s3:GetBucketVersioning）
+//   - 默认           -> 列出对象（s3:ListBucket），支持 prefix/delimiter/max-keys/
+//     continuation-token/marker/start-after 分页参数
+//
+// 响应：200 XML（locationConstraint / versioningConfiguration / ListBucketResult）
 func (h *Handler) ListObjects(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
 	if q.Has("location") {
@@ -163,6 +191,11 @@ func (h *Handler) ListObjects(w http.ResponseWriter, r *http.Request, bucket str
 	writeXML(w, http.StatusOK, out)
 }
 
+// PutObject 上传（或覆盖）对象。
+// PUT /{bucket}/{object}
+// 请求体：对象内容；Content-Type 作为对象类型；X-Amz-Meta-* 作为用户元数据
+// 权限：s3:PutObject
+// 响应：200，ETag 头；开启版本控制时带 x-amz-version-id
 func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	info, err := h.Store.PutObject(r.Context(), bucket, object, r.Body, r.ContentLength, objectContentType(r), userMetadata(r))
 	if err != nil {
@@ -176,6 +209,10 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request, bucket, obje
 	w.WriteHeader(http.StatusOK)
 }
 
+// GetObject 下载对象。
+// GET /{bucket}/{object}[?versionId=xxx]
+// 权限：s3:GetObject
+// 响应：200 对象内容，支持 Range（http.ServeContent）；返回 Content-Type、ETag 等头
 func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	versionID := r.URL.Query().Get("versionId")
 	rc, info, err := h.Store.GetObject(r.Context(), bucket, object, versionID)
@@ -191,6 +228,10 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request, bucket, obje
 	http.ServeContent(w, r, "", info.ModTime, rc)
 }
 
+// HeadObject 获取对象元信息（不返回内容）。
+// HEAD /{bucket}/{object}[?versionId=xxx]
+// 权限：s3:GetObject
+// 响应：200，带 Content-Type、ETag、Content-Length、Last-Modified 等头
 func (h *Handler) HeadObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	versionID := r.URL.Query().Get("versionId")
 	info, err := h.Store.StatObject(r.Context(), bucket, object, versionID)
@@ -207,6 +248,10 @@ func (h *Handler) HeadObject(w http.ResponseWriter, r *http.Request, bucket, obj
 	w.WriteHeader(http.StatusOK)
 }
 
+// DeleteObject 删除对象或某个版本。
+// DELETE /{bucket}/{object}[?versionId=xxx]
+// 权限：s3:DeleteObject
+// 响应：204；若产生删除标记则带 x-amz-delete-marker 头
 func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	versionID := r.URL.Query().Get("versionId")
 	res, err := h.Store.DeleteObject(r.Context(), bucket, object, versionID)
@@ -223,6 +268,11 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request, bucket, o
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// DeleteObjects 批量删除对象（S3 批量删除）。
+// POST /{bucket}?delete
+// 请求体：XML Delete（可含 Quiet、Object/Key/VersionID 列表）
+// 权限：s3:DeleteObject
+// 响应：200 XML DeleteResult（逐项 Deleted/Error）
 func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request, bucket string) {
 	var req deleteRequest
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -247,6 +297,10 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request, bucket s
 	writeXML(w, http.StatusOK, out)
 }
 
+// CreateMultipartUpload 初始化分片上传，返回 uploadId。
+// POST /{bucket}/{object}?uploads
+// 权限：s3:PutObject
+// 响应：200 XML InitiateMultipartUploadResult（含 UploadId）
 func (h *Handler) CreateMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	uploadID, err := h.Store.NewMultipartUpload(r.Context(), bucket, object, objectContentType(r), userMetadata(r))
 	if err != nil {
@@ -261,6 +315,11 @@ func (h *Handler) CreateMultipartUpload(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
+// UploadPart 上传一个分片。
+// PUT /{bucket}/{object}?uploadId=xxx&partNumber=N
+// 请求体：分片内容
+// 权限：s3:PutObject
+// 响应：200，ETag 头为该分片校验值
 func (h *Handler) UploadPart(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	uploadID := r.URL.Query().Get("uploadId")
 	partNumber, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
@@ -277,6 +336,10 @@ func (h *Handler) UploadPart(w http.ResponseWriter, r *http.Request, bucket, obj
 	w.WriteHeader(http.StatusOK)
 }
 
+// ListParts 列出某次分片上传已上传的分片。
+// GET /{bucket}/{object}?uploadId=xxx
+// 权限：s3:ListMultipartUploadParts
+// 响应：200 XML ListPartsResult
 func (h *Handler) ListParts(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	uploadID := r.URL.Query().Get("uploadId")
 	parts, err := h.Store.ListObjectParts(r.Context(), bucket, object, uploadID)
@@ -305,6 +368,11 @@ func (h *Handler) ListParts(w http.ResponseWriter, r *http.Request, bucket, obje
 	writeXML(w, http.StatusOK, out)
 }
 
+// CompleteMultipartUpload 合并所有分片为最终对象。
+// POST /{bucket}/{object}?uploadId=xxx
+// 请求体：XML CompleteMultipartUpload（分片号与 ETag 列表）
+// 权限：s3:PutObject
+// 响应：200 XML CompleteMultipartUploadResult；开启版本控制时带 x-amz-version-id
 func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	uploadID := r.URL.Query().Get("uploadId")
 	var req completeMultipartUploadRequest
@@ -337,6 +405,10 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// AbortMultipartUpload 取消分片上传并清理已上传的分片。
+// DELETE /{bucket}/{object}?uploadId=xxx
+// 权限：s3:AbortMultipartUpload
+// 响应：204
 func (h *Handler) AbortMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	uploadID := r.URL.Query().Get("uploadId")
 	if err := h.Store.AbortMultipartUpload(r.Context(), bucket, object, uploadID); err != nil {
@@ -346,6 +418,10 @@ func (h *Handler) AbortMultipartUpload(w http.ResponseWriter, r *http.Request, b
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ListMultipartUploads 列出 bucket 内进行中的分片上传。
+// GET /{bucket}?uploads[&prefix=xxx]
+// 权限：s3:ListBucketMultipartUploads
+// 响应：200 XML ListMultipartUploadsResult
 func (h *Handler) ListMultipartUploads(w http.ResponseWriter, r *http.Request, bucket string) {
 	uploads, err := h.Store.ListMultipartUploads(r.Context(), bucket)
 	if err != nil {
@@ -368,6 +444,11 @@ func (h *Handler) ListMultipartUploads(w http.ResponseWriter, r *http.Request, b
 	writeXML(w, http.StatusOK, out)
 }
 
+// SetBucketVersioning 设置 bucket 的版本控制状态。
+// PUT /{bucket}?versioning
+// 请求体：XML VersioningConfiguration（Status: Enabled/Suspended）
+// 权限：s3:PutBucketVersioning
+// 响应：200
 func (h *Handler) SetBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
 	var req versioningConfigurationRequest
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -381,6 +462,10 @@ func (h *Handler) SetBucketVersioning(w http.ResponseWriter, r *http.Request, bu
 	w.WriteHeader(http.StatusOK)
 }
 
+// ListObjectVersions 列出对象的所有版本（含删除标记）。
+// GET /{bucket}?versions[&prefix=&delimiter=&key-marker=&version-id-marker=&max-keys=]
+// 权限：s3:ListBucketVersions
+// 响应：200 XML ListVersionsResult
 func (h *Handler) ListObjectVersions(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
 	opts := store.ListOptions{
@@ -431,6 +516,10 @@ func (h *Handler) ListObjectVersions(w http.ResponseWriter, r *http.Request, buc
 	writeXML(w, http.StatusOK, out)
 }
 
+// GetBucketLifecycle 获取 bucket 的生命周期规则配置。
+// GET /{bucket}?lifecycle
+// 权限：s3:GetLifecycleConfiguration
+// 响应：200 XML LifecycleConfiguration；未配置返回 404 NoSuchLifecycleConfiguration
 func (h *Handler) GetBucketLifecycle(w http.ResponseWriter, r *http.Request, bucket string) {
 	cfg, err := h.Store.GetBucketLifecycle(r.Context(), bucket)
 	if err != nil {
@@ -445,6 +534,11 @@ func (h *Handler) GetBucketLifecycle(w http.ResponseWriter, r *http.Request, buc
 	writeXML(w, http.StatusOK, cfg)
 }
 
+// SetBucketLifecycle 设置 bucket 的生命周期规则配置。
+// PUT /{bucket}?lifecycle
+// 请求体：XML LifecycleConfiguration
+// 权限：s3:PutLifecycleConfiguration
+// 响应：200；规则非法返回 400 InvalidLifecycle
 func (h *Handler) SetBucketLifecycle(w http.ResponseWriter, r *http.Request, bucket string) {
 	var cfg lifecycle.Configuration
 	if err := xml.NewDecoder(r.Body).Decode(&cfg); err != nil {
@@ -462,6 +556,10 @@ func (h *Handler) SetBucketLifecycle(w http.ResponseWriter, r *http.Request, buc
 	w.WriteHeader(http.StatusOK)
 }
 
+// DeleteBucketLifecycle 删除 bucket 的生命周期规则配置。
+// DELETE /{bucket}?lifecycle
+// 权限：s3:PutLifecycleConfiguration
+// 响应：204；未配置返回 404 NoSuchLifecycleConfiguration
 func (h *Handler) DeleteBucketLifecycle(w http.ResponseWriter, r *http.Request, bucket string) {
 	if err := h.Store.DeleteBucketLifecycle(r.Context(), bucket); err != nil {
 		if errors.Is(err, store.ErrNoLifecycleConfig) {

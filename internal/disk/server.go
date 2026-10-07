@@ -11,6 +11,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Server 是实现 DiskService 的 gRPC 服务端，代表一个节点。
+// 它持有本节点的若干磁盘，其他节点通过该服务读写这些磁盘。
 type Server struct {
 	UnimplementedDiskServiceServer
 	address string
@@ -18,14 +20,17 @@ type Server struct {
 	log     *slog.Logger
 }
 
+// NewServer 创建节点磁盘服务：address 为本节点对外地址，disks 为本节点磁盘列表。
 func NewServer(address string, disks []Disk, log *slog.Logger) *Server {
 	return &Server{address: address, disks: disks, log: log}
 }
 
+// Register 把本服务注册到 gRPC server 上。
 func (s *Server) Register(g *grpc.Server) {
 	RegisterDiskServiceServer(g, s)
 }
 
+// drive 按下标取出对应磁盘，越界返回 InvalidArgument。
 func (s *Server) drive(index int32) (Disk, error) {
 	if index < 0 || int(index) >= len(s.disks) {
 		return nil, status.Errorf(codes.InvalidArgument, "drive index %d out of range", index)
@@ -33,6 +38,7 @@ func (s *Server) drive(index int32) (Disk, error) {
 	return s.disks[index], nil
 }
 
+// Info 返回本节点信息：对外地址与磁盘数量/下标列表，供对端组建集群时使用。
 func (s *Server) Info(ctx context.Context, _ *NodeInfoRequest) (*NodeInfo, error) {
 	drives := make([]string, len(s.disks))
 	for i := range s.disks {

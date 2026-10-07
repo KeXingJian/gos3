@@ -14,6 +14,10 @@ import (
 
 const maxPresignExpiry = 7 * 24 * 3600
 
+// adminPresign 生成对象下载的预签名 URL（使用 root 凭据签名）。
+// GET /gos3/admin/presign?bucket=&object=[&expires=秒]
+// expires 默认 3600，范围 1..maxPresignExpiry（7 天）
+// 响应：200 JSON {"url": "...", "expires": N}
 func (h *Handler) adminPresign(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -47,6 +51,15 @@ func (h *Handler) adminPresign(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusOK, map[string]any{"url": link, "expires": expires})
 }
 
+// serveAdminBuckets 管理端的 bucket/object 操作（返回 JSON，供 UI 使用）。
+// 依据 path 后缀与 method 分发：
+//   - GET    /gos3/admin/buckets                              列出 bucket
+//   - PUT    /gos3/admin/buckets?name=                        创建 bucket
+//   - DELETE /gos3/admin/buckets/{bucket}                     删除 bucket
+//   - GET    /gos3/admin/buckets/{bucket}/objects[?prefix=&delimiter=]  列出对象
+//   - GET    /gos3/admin/buckets/{bucket}/objects/{object}           下载对象内容
+//   - PUT    /gos3/admin/buckets/{bucket}/objects/{object}           上传对象
+//   - DELETE /gos3/admin/buckets/{bucket}/objects/{object}           删除对象
 func (h *Handler) serveAdminBuckets(w http.ResponseWriter, r *http.Request, rest string) {
 	if rest == "" || rest == "/" {
 		switch r.Method {

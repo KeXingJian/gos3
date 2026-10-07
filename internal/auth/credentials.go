@@ -12,16 +12,6 @@ type Store struct {
 	creds map[string]Credentials
 }
 
-func NewStore(list ...Credentials) *Store {
-	s := &Store{creds: make(map[string]Credentials, len(list))}
-	for _, c := range list {
-		if c.AccessKey != "" {
-			s.creds[c.AccessKey] = c
-		}
-	}
-	return s
-}
-
 func (s *Store) Get(accessKey string) (Credentials, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

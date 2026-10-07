@@ -40,6 +40,42 @@ func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
+// route 是 HTTP 路由总入口，按 URL 形态与方法分发到具体处理器。
+// 匹配顺序：管理接口 /gos3/admin/* -> 内置 UI -> 公开路径 -> 根路径 -> bucket/object。
+// 完整路由（S3 兼容）：
+//
+//	GET    /                                 列出 bucket (ListBuckets)
+//	GET    /healthz, /minio/health/*         健康检查
+//	GET    /ui, /ui/                         内置管理页
+//	/gos3/admin/*                            管理接口（见 api.ServeAdmin）
+//
+// Bucket 级（/{bucket}）：
+//
+//	GET    ?location     GetBucketLocation
+//	GET    ?versioning   GetBucketVersioning
+//	GET    ?lifecycle    GetBucketLifecycle
+//	GET    ?versions     ListObjectVersions
+//	GET    ?uploads      ListMultipartUploads
+//	GET                  ListObjects
+//	PUT    ?versioning   SetBucketVersioning
+//	PUT    ?lifecycle    SetBucketLifecycle
+//	PUT                  CreateBucket
+//	HEAD                 HeadBucket
+//	DELETE ?lifecycle    DeleteBucketLifecycle
+//	DELETE               DeleteBucket
+//	POST   ?delete       DeleteObjects
+//
+// Object 级（/{bucket}/{object}）：
+//
+//	POST   ?uploads               CreateMultipartUpload
+//	POST   ?uploadId=             CompleteMultipartUpload
+//	PUT    ?uploadId=&partNumber= UploadPart
+//	PUT                           PutObject
+//	GET    ?uploadId=             ListParts
+//	GET                           GetObject
+//	HEAD                          HeadObject
+//	DELETE ?uploadId=             AbortMultipartUpload
+//	DELETE                        DeleteObject
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	if s.api.ServeAdmin(w, r) {
 		return
