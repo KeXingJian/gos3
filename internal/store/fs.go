@@ -38,6 +38,28 @@ type fsVersion struct {
 	ContentType  string            `json:"contentType"`
 	UserMetadata map[string]string `json:"userMetadata,omitempty"`
 	ModTime      time.Time         `json:"modTime"`
+	// DataID 是该版本分片数据的存储键。纠删码后端每次写入都会分配一个新的 DataID，
+	// 这样即使是「null」版本的覆盖写，「先写新、提交后再删旧」也不会出现同路径覆盖窗口；
+	// 历史数据没有该字段时回退到 VersionID。
+	DataID string `json:"dataId,omitempty"`
+	// Parts 记录对象由哪些 part 组成（普通 PUT 只有一个 part）。
+	// 为空表示历史/FS 布局：整个对象是一块分片文件；非空时数据目录下是 part.<n> 文件。
+	Parts []fsPartRef `json:"parts,omitempty"`
+}
+
+// fsPartRef 是对象内一个 part 的描述：分片文件名 part.<Number>，Size/ETag 用于读时校验与复合 ETag。
+type fsPartRef struct {
+	Number int    `json:"number"`
+	Size   int64  `json:"size"`
+	ETag   string `json:"etag"`
+}
+
+// dataKey 返回该版本数据文件的存储键。
+func (v fsVersion) dataKey() string {
+	if v.DataID != "" {
+		return v.DataID
+	}
+	return v.VersionID
 }
 
 type fsMeta struct {
@@ -64,6 +86,9 @@ type fsPartMeta struct {
 	ETag       string    `json:"etag"`
 	Size       int64     `json:"size"`
 	ModTime    time.Time `json:"modTime"`
+	// DataID 是该 part 分片在暂存目录里的存储键（每次写入生成新的）：
+	// 分片文件名形如 part.<Number>.<DataID>，完成上传时被 rename 到对象数据目录。
+	DataID string `json:"dataId,omitempty"`
 }
 
 // toInfo 把内部版本记录 fsVersion 转换为对外返回的 ObjectInfo。
@@ -1145,6 +1170,23 @@ func removeVersion(versions []fsVersion, versionID string) []fsVersion {
 		out = append(out, version)
 	}
 	return out
+}
+
+// dropVersionMeta 从元数据中摘掉指定版本，并返回被摘掉的版本。
+// 注意：它只改内存中的元数据，不删除任何数据 —— 数据清理由调用方在元数据提交成功后进行，
+// 这样「先提交、后删旧」不会出现新旧都不完整的窗口。
+func dropVersionMeta(meta fsMeta, versionID string) (fsMeta, []fsVersion) {
+	var dropped []fsVersion
+	kept := make([]fsVersion, 0, len(meta.Versions))
+	for _, version := range meta.Versions {
+		if version.VersionID == versionID {
+			dropped = append(dropped, version)
+			continue
+		}
+		kept = append(kept, version)
+	}
+	meta.Versions = kept
+	return meta, dropped
 }
 
 // assignVersionID 依据 bucket 的版本控制状态分配版本号：

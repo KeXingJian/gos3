@@ -55,6 +55,22 @@ func (l *Local) WriteFile(ctx context.Context, path string, data []byte) error {
 	return os.Rename(tmp, full)
 }
 
+// Rename 在盘内原子移动文件（同一个文件系统内的 rename）。
+// 目标父目录不存在时自动创建；源文件不存在返回 ErrNotExist。
+func (l *Local) Rename(ctx context.Context, src, dst string) error {
+	srcFull, dstFull := l.full(src), l.full(dst)
+	if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(srcFull, dstFull); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotExist
+		}
+		return err
+	}
+	return nil
+}
+
 func (l *Local) DeleteFile(ctx context.Context, path string) error {
 	err := os.Remove(l.full(path))
 	if errors.Is(err, os.ErrNotExist) {

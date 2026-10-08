@@ -9,6 +9,10 @@ message Empty {}
 message FileRequest {
   int32 drive = 1;
   string path = 2;
+  // 期望的目标盘 UUID（来自 format.json）。
+  // 服务端用它比对本槽位盘的 UUID：不一致说明对端的盘映射已过期
+  // （盘被替换或顺序变了），返回 FailedPrecondition 而不是写错盘。
+  string drive_uuid = 3;
 }
 
 message FileResponse {
@@ -19,6 +23,7 @@ message WriteRequest {
   int32 drive = 1;
   string path = 2;
   bytes data = 3;
+  string drive_uuid = 4;
 }
 
 message StatResponse {
@@ -42,22 +47,26 @@ message WalkResponse {
   repeated string dirs = 2;
 }
 
-message NodeInfoRequest {}
-
-message NodeInfo {
-  string address = 1;
-  repeated string drives = 2;
+message RenameRequest {
+  int32 drive = 1;
+  string src = 2;
+  string dst = 3;
+  string drive_uuid = 4;
 }
 
+// DiskService 是磁盘级数据面：每个 RPC 都作用在「某一块盘」上。
+// 节点级信息（成员/布局/存活）在 PeerService（internal/peer）。
 service DiskService {
-  rpc Info(NodeInfoRequest) returns (NodeInfo);
   rpc ReadFile(FileRequest) returns (FileResponse);
   rpc WriteFile(WriteRequest) returns (Empty);
+  // Rename 是「临时写入 -> 提交」两阶段写的提交动作，必须原子。
+  rpc Rename(RenameRequest) returns (Empty);
   rpc DeleteFile(FileRequest) returns (Empty);
   rpc DeleteDir(FileRequest) returns (Empty);
   rpc MakeDir(FileRequest) returns (Empty);
   rpc Stat(FileRequest) returns (StatResponse);
   rpc ListDir(FileRequest) returns (DirResponse);
   rpc Walk(FileRequest) returns (WalkResponse);
-  rpc Health(Empty) returns (Empty);
+  // Health 探测单块盘的可用性（drive 指定下标）。
+  rpc Health(FileRequest) returns (Empty);
 }

@@ -18,16 +18,17 @@ type Server struct {
 	handler http.Handler
 }
 
-func New(cfg config.Config, st store.Store, iamStore *iam.Store, logger *slog.Logger) *Server {
+func New(cfg config.Config, st store.Store, iamStore *iam.Store, logger *slog.Logger, healthReporter api.HealthReporter) *Server {
 	s := &Server{
 		api: &api.Handler{
-			Store:    st,
-			IAM:      iamStore,
-			Region:   cfg.Region,
-			OwnerID:  cfg.OwnerID,
-			RootUser: cfg.RootUser,
-			RootPass: cfg.RootPass,
-			Logger:   logger,
+			Store:         st,
+			IAM:           iamStore,
+			ClusterHealth: healthReporter,
+			Region:        cfg.Region,
+			OwnerID:       cfg.OwnerID,
+			RootUser:      cfg.RootUser,
+			RootPass:      cfg.RootPass,
+			Logger:        logger,
 		},
 		iam:    iamStore,
 		logger: logger,
@@ -84,7 +85,15 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isPublicPath(r.URL.Path) {
-		s.api.Health(w, r)
+		// 健康检查分三类：存活 /healthz、就绪 /minio/health/ready、集群详情 /minio/health/cluster
+		switch r.URL.Path {
+		case "/minio/health/ready":
+			s.api.HealthReady(w, r)
+		case "/minio/health/cluster":
+			s.api.HealthCluster(w, r)
+		default:
+			s.api.Health(w, r)
+		}
 		return
 	}
 	if r.URL.Path == "/" {

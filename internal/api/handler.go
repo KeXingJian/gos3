@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,28 +13,81 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kxj/gos3/internal/health"
 	"github.com/kxj/gos3/internal/iam"
 	"github.com/kxj/gos3/internal/lifecycle"
 	"github.com/kxj/gos3/internal/store"
 )
 
-type Handler struct {
-	Store    store.Store
-	IAM      *iam.Store
-	Region   string
-	OwnerID  string
-	RootUser string
-	RootPass string
-	Logger   *slog.Logger
+// HealthReporter 提供集群健康视图（实现见 internal/health.Cluster）。
+// 为 nil 时所有健康检查都按「健康」处理（例如单盘 FS 模式）。
+type HealthReporter interface {
+	Snapshot() health.Snapshot
+	// Readable 表示在线盘数达到读法定人数。
+	Readable() bool
+	// Ready 表示在线盘数达到写法定人数。
+	Ready() bool
 }
 
-// Health 健康检查接口（公开，无需鉴权）。
-// GET /healthz、/minio/health/*
-// 响应：200 纯文本 "ok\n"
+type Handler struct {
+	Store         store.Store
+	IAM           *iam.Store
+	ClusterHealth HealthReporter
+	Region        string
+	OwnerID       string
+	RootUser      string
+	RootPass      string
+	Logger        *slog.Logger
+}
+
+// Health 是存活检查（公开，无需鉴权）：GET /healthz、/minio/health/live。
+// 响应：200 纯文本 "ok\n"（不依赖磁盘/peer，进程活着就返回 ok）。
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, "ok\n")
+}
+
+// HealthReady 是就绪检查：GET /minio/health/ready。
+// 在线盘数达到写法定人数才算就绪，否则 503（负载均衡/容器编排据此摘流量）。
+func (h *Handler) HealthReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	if h.ClusterHealth == nil || h.ClusterHealth.Ready() {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+		return
+	}
+	snap := h.ClusterHealth.Snapshot()
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = io.WriteString(w, fmt.Sprintf("not ready: online drives %d < write quorum %d\n", snap.Online, snap.WriteQuorum))
+}
+
+// HealthCluster 返回集群健康详情：GET /minio/health/cluster。
+// 在线盘数达到读法定人数返回 200，否则 503；响应头带法定人数与在线盘数，响应体是 JSON 快照。
+func (h *Handler) HealthCluster(w http.ResponseWriter, r *http.Request) {
+	if h.ClusterHealth == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"onlineDrives":0,"readQuorum":0,"writeQuorum":0}`+"\n")
+		return
+	}
+	snap := h.ClusterHealth.Snapshot()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Gos3-Online-Drives", strconv.Itoa(snap.Online))
+	w.Header().Set("X-Gos3-Total-Drives", strconv.Itoa(snap.Total))
+	w.Header().Set("X-Gos3-Read-Quorum", strconv.Itoa(snap.ReadQuorum))
+	w.Header().Set("X-Gos3-Write-Quorum", strconv.Itoa(snap.WriteQuorum))
+	w.Header().Set("X-Gos3-Pending-Heals", strconv.Itoa(snap.PendingHeal))
+	status := http.StatusOK
+	if !h.ClusterHealth.Readable() {
+		status = http.StatusServiceUnavailable
+	}
+	w.WriteHeader(status)
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	_, _ = w.Write(append(data, '\n'))
 }
 
 // owner 返回 S3 响应中统一的 owner 信息（固定显示名 gos3）。
@@ -640,6 +695,12 @@ func (h *Handler) writeStoreError(w http.ResponseWriter, r *http.Request, err er
 		WriteError(w, r, ErrNoSuchVersion)
 	case errors.Is(err, store.ErrInvalidVersioning):
 		WriteError(w, r, ErrInvalidVersioning)
+	case errors.Is(err, store.ErrWriteQuorum):
+		WriteError(w, r, ErrWriteQuorum)
+	case errors.Is(err, store.ErrReadQuorum):
+		WriteError(w, r, ErrReadQuorum)
+	case errors.Is(err, store.ErrLockTimeout):
+		WriteError(w, r, ErrLockTimeout)
 	default:
 		h.Logger.Error("[gos3: internal-error]", "path", r.URL.Path, "error", err.Error())
 		WriteError(w, r, ErrInternalError)

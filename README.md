@@ -22,8 +22,8 @@ A minimal, S3-compatible object storage server written in Go, built as a learnin
   user/policy management
 - AWS Signature V4: header signing, presigned URLs, streaming chunk signatures
 - Versioned JSON metadata (`<root>/.meta/<bucket>/<object>.json` holds a list of versions),
-  with per-version data under `<root>/.data/<bucket>/<object>/<versionId>`
-- Multipart staging under `<root>/.multipart/<bucket>/<uploadId>/` with stale-upload cleanup
+  with per-version data under `<root>/.data/<bucket>/<object>/<dataId>/part.<n>` (one shard file per part per drive)
+- Multipart staging under `<root>/.multipart/<bucket>/<uploadId>/` on every drive, with stale-upload cleanup
 - Range requests and conditional requests via `http.ServeContent`
 - Graceful shutdown, structured logging (`log/slog`), request IDs
 - External dependencies: `klauspost/reedsolomon`, `google.golang.org/grpc`, `google.golang.org/protobuf`,
@@ -63,7 +63,18 @@ mc rm local/demo/README.md
 mc rb local/demo
 ```
 
-Health endpoints: `GET /healthz`, `GET /minio/health/live`, `GET /minio/health/ready`.
+Health endpoints:
+
+| Endpoint | Meaning |
+| --- | --- |
+| `GET /healthz`, `GET /minio/health/live` | process liveness (no disk/peer dependency) |
+| `GET /minio/health/ready` | ready when online drives ≥ write quorum, otherwise 503 |
+| `GET /minio/health/cluster` | 200 when online drives ≥ read quorum (503 otherwise); headers `X-Gos3-Online-Drives`/`Total-Drives`/`Read-Quorum`/`Write-Quorum`/`Pending-Heals` plus a JSON snapshot |
+
+Drive health is probed every 15s (write/read/delete a 2 KiB probe file per drive; remote drives are
+skipped while their node is known offline) and a drive that fails is reported as `disk-faulty`.
+Missing shards discovered on the read path are queued and rebuilt in the background from the
+remaining shards (`heal-rebuilt`).
 
 ## IAM (users, policies, authorization)
 
@@ -155,14 +166,23 @@ flowchart TD
     ER --> DK{"disk.Disk"}
     DK --> LOCAL["disk.Local (this node's drives)"]
     DK --> REMOTE["disk.Remote (gRPC -> peer drives)"]
-    LOCAL --> SH[<drive>/.data/bucket/object/versionId = shard_i]
+    LOCAL --> SH["<drive>/.data/bucket/object/dataId/part.N = shard_i"]
     REMOTE --> SH2[peer drive shards]
 ```
 
 The `Erasure` object layer is written only against the `disk.Disk` interface, so the
 same code drives local directories and remote nodes. `internal/cluster` starts the gRPC
-disk service, discovers peers, and assembles the global ordered drive list (sorted by
-node address), which every node computes identically.
+servers, discovers peers, and assembles the global ordered drive list (sorted by
+node address), which every node computes identically. Internode traffic is split in three:
+`disk.DiskService` (per-drive data plane, every request carries the expected `drive_uuid`),
+`peer.PeerService` (node-level info/health, probed every 5s so a dead node is reported
+as `peer-offline`), and `lock.LockService` (per-node namespace lock table). Object writes,
+deletes and multipart completion take a quorum write lock on `bucket/object` before touching
+data, so concurrent writers on different nodes serialize instead of overwriting each other.
+`internal/format` then persists and verifies the layout on every drive
+(`<drive>/.gos3.sys/format.json`): the first node by address initializes a fresh cluster,
+the rest wait and verify, and each node cross-checks `deploymentID`/`layoutHash` with its
+peers before serving requests.
 
 Request pipeline:
 
@@ -189,10 +209,15 @@ sequenceDiagram
 | `internal/config` | Runtime configuration and defaults |
 | `internal/auth` | Credential store (access key -> secret key) |
 | `internal/sign` | SigV4 verification and streaming chunk decoding |
-| `internal/store` | Storage interface, filesystem (`FS`) and erasure (`Erasure`) backends |
+| `internal/store` | Storage interface, filesystem (`FS`) and erasure (`Erasure`) backends, quorum reduction |
 | `internal/erasure` | Reed-Solomon encode/decode (`klauspost/reedsolomon`) |
 | `internal/disk` | `Disk` abstraction: `Local` (filesystem) and `Remote` (gRPC), plus generated proto |
-| `internal/cluster` | gRPC disk service, peer discovery, global drive assembly |
+| `internal/cluster` | gRPC servers, peer discovery, global drive assembly, peer layout cross-check |
+| `internal/peer` | Node-level control plane: `PeerService` (info/health), peer connections and online state |
+| `internal/lock` | Namespace lock: per-node lock table (`LockService`) plus a quorum-based `DRWMutex` |
+| `internal/health` | Drive probes (15s), cluster health view for `/minio/health/*` |
+| `internal/heal` | Minimal read-repair queue (rebuild missing shards from the remaining ones) |
+| `internal/format` | `format.json` (deployment ID + per-drive UUIDs + drive layout) persistence and quorum validation |
 | `internal/iam` | Users, policies, credentials provider, authorization evaluation |
 | `internal/lifecycle` | Lifecycle configuration model and expiration evaluation |
 | `internal/telemetry` | OpenTelemetry setup (stdout/OTLP) and context-aware slog handler |
@@ -207,16 +232,30 @@ sequenceDiagram
 - Erasure coding is currently **whole-object and in-memory** (no per-block streaming), so very large
   objects are bounded by RAM. This also bounds the gRPC shard message size (raised to 128 MiB);
   MinIO streams block-by-block, which is a future step.
-- Erasure layout (drive count, data/parity) is fixed at startup and not persisted in a `format.json`,
-  so data must be read back with the same layout.
-- Cluster membership is static (flags), with no distributed lock/leader election; concurrent writes
-  to the same key from different nodes are not coordinated.
+- Drive layout and identity (deployment ID + per-drive UUIDs) are persisted in `<root>/.gos3.sys/format.json`
+  and validated at startup, so a reordered or asymmetric cluster fails fast instead of corrupting shards.
+  The data/parity shard counts are still derived from the drive count at startup (not persisted).
+- Erasure writes are two-phase (stage shards under `.tmp/<dataID>` → `rename` to commit → commit metadata →
+  drop the replaced version) with MinIO-style quorums: `read = dataShards`, `write = dataShards`
+  (`+1` when `data == parity`). Unmet quorums surface as `503 SlowDown` and never destroy the previous
+  version, but rollback leaves orphaned shard directories on drives that were unreachable mid-commit
+  (no background sweep yet).
+- Read repair only covers data shards discovered missing on the read path; object metadata missing on a
+  lagging drive is tolerated by quorum reads but not actively rewritten, and there is no bitrot scan.
+- Cluster membership is static (flags), with no leader election. Concurrent writes to the same key
+  are serialized by a simplified dsync-style namespace lock (majority of *online* nodes, 10s acquire
+  window, 10s refresh, 1m expiry), but a network partition can still let both sides write to their own
+  majority if the cluster is split evenly. Peer liveness is probed (`peer-offline`/`peer-online`), and
+  object PUT/GET/LIST/bucket ops require quorum instead of failing on the first unreachable drive.
 - IAM state is stored per node and not replicated across the cluster; the admin API uses HTTP Basic
   over plaintext (use it on a trusted network or behind TLS).
 - Lifecycle supports only `Expiration` (Days/Date); no transitions, noncurrent-version expiration,
   or tag/size filters.
-- Multipart staging lives on the first global drive only; the assembled object is erasure-coded on completion.
-- Composite multipart ETag is `md5(concat(part md5s))-N`; no server-side checksum verification of the assembled body.
+- Multipart staging and part shards are spread across every drive (`.multipart/<bucket>/<uploadId>/`), each part is
+  erasure-coded independently, and completion just renames the part shards into the object data directory
+  (`.data/<bucket>/<object>/<dataId>/part.<n>`) before committing metadata — no re-encoding, no first-drive single point.
+- Composite multipart ETag is `md5(concat(part md5s))-N`; part ETags are verified against the stored part metadata,
+  but the assembled body is not re-hashed server-side.
 - Minimum part size (5 MiB except the last) is not enforced yet.
 - Streaming signature **trailer** variant (`...-TRAILER`) not supported.
 - IAM, lifecycle, and event notification not implemented.

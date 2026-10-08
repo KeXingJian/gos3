@@ -38,6 +38,10 @@ var (
 	ErrNotImplemented               = Error{"NotImplemented", "A header you provided implies functionality that is not implemented.", http.StatusNotImplemented}
 	ErrMethodNotAllowed             = Error{"MethodNotAllowed", "The specified method is not allowed against this resource.", http.StatusMethodNotAllowed}
 	ErrInternalError                = Error{"InternalError", "We encountered an internal error, please try again.", http.StatusInternalServerError}
+	// 法定人数不足属于可重试的暂时性故障（对齐 MinIO 的 503 SlowDown 语义）。
+	ErrWriteQuorum = Error{"SlowDown", "Write quorum not reached, the write did not take effect. Please retry.", http.StatusServiceUnavailable}
+	ErrReadQuorum  = Error{"SlowDown", "Read quorum not reached, the object state could not be determined. Please retry.", http.StatusServiceUnavailable}
+	ErrLockTimeout = Error{"SlowDown", "The resource is locked by another writer. Please retry.", http.StatusServiceUnavailable}
 )
 
 type errorResponse struct {

@@ -26,6 +26,13 @@ var (
 	ErrDeleteMarker      = errors.New("object is a delete marker")
 	ErrInvalidVersioning = errors.New("invalid versioning status")
 	ErrNoLifecycleConfig = errors.New("no lifecycle configuration")
+
+	// ErrWriteQuorum 表示写入未达到写法定人数：本次修改没有生效，旧数据仍然可用。
+	ErrWriteQuorum = errors.New("write quorum not reached")
+	// ErrReadQuorum 表示读取未达到读法定人数：无法判定权威数据，宁可报错也不返回可疑结果。
+	ErrReadQuorum = errors.New("read quorum not reached")
+	// ErrLockTimeout 表示命名空间锁没拿到（锁法定人数不足），调用方应重试。
+	ErrLockTimeout = errors.New("namespace lock not acquired")
 )
 
 const (

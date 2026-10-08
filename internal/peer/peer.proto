@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package peer;
+
+option go_package = "github.com/kxj/gos3/internal/peer;peer";
+
+message Empty {}
+
+message InfoRequest {}
+
+// InfoResponse 是节点级成员信息：对端据此组建集群并校验布局一致性。
+message InfoResponse {
+  // 本节点对外广播的 gRPC 地址（其他节点用它访问本节点）。
+  string address = 1;
+  // 本节点本地盘标识列表（形如 "<address>/<序号>"），长度即本地盘数量。
+  repeated string drives = 2;
+  // 布局固化（format.json）完成后的部署 ID 与布局摘要；未就绪时为空串。
+  string deployment_id = 3;
+  string layout_hash = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  // 节点存活即为 true；盘级健康由 DiskService.Health 单独探测。
+  bool ok = 1;
+}
+
+// PeerService 是节点级控制面（成员/健康，后续含分布式锁），
+// 与磁盘级数据面 DiskService 共用同一个 gRPC server/端口。
+service PeerService {
+  rpc Info(InfoRequest) returns (InfoResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}

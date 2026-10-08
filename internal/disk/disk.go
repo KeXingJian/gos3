@@ -28,6 +28,8 @@ type Disk interface {
 	ID() string
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	WriteFile(ctx context.Context, path string, data []byte) error
+	// Rename 原子地把 src 移动到 dst（同盘内），是「临时写入 -> 提交」两阶段写的提交动作。
+	Rename(ctx context.Context, src, dst string) error
 	DeleteFile(ctx context.Context, path string) error
 	DeleteDir(ctx context.Context, path string) error
 	MakeDir(ctx context.Context, path string) error

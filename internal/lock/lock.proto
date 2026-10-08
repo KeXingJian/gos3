@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package lock;
+
+option go_package = "github.com/kxj/gos3/internal/lock;lock";
+
+// LockRequest 是一次命名空间锁操作：resource 是被保护的资源键（如 "bucket/object"），
+// uid 是持锁者标识（由「节点地址 + 进程内序号」组成，专门用于识别同一个写者）。
+message LockRequest {
+  string resource = 1;
+  string uid = 2;
+  string source = 3;
+  // force 只在 Unlock 时有意义：忽略 uid 直接释放（用于丢法定人数后的兜底清理）。
+  bool force = 4;
+}
+
+message LockResponse {
+  bool ok = 1;
+}
+
+// LockService 是节点级锁服务：每个节点维护自己的一份锁表，
+// 上层的 DRWMutex 向所有在线节点并发请求，凑够法定人数才算持锁成功。
+service LockService {
+  rpc Lock(LockRequest) returns (LockResponse);
+  rpc Unlock(LockRequest) returns (LockResponse);
+  rpc RLock(LockRequest) returns (LockResponse);
+  rpc RUnlock(LockRequest) returns (LockResponse);
+  rpc Refresh(LockRequest) returns (LockResponse);
+}

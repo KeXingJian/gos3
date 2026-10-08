@@ -18,7 +18,11 @@ import (
 	"github.com/kxj/gos3/internal/cluster"
 	"github.com/kxj/gos3/internal/config"
 	"github.com/kxj/gos3/internal/disk"
+	"github.com/kxj/gos3/internal/format"
+	"github.com/kxj/gos3/internal/heal"
+	"github.com/kxj/gos3/internal/health"
 	"github.com/kxj/gos3/internal/iam"
+	"github.com/kxj/gos3/internal/lock"
 	"github.com/kxj/gos3/internal/server"
 	"github.com/kxj/gos3/internal/store"
 	"github.com/kxj/gos3/internal/telemetry"
@@ -123,12 +127,13 @@ func runServer(args []string) int {
 	}()
 
 	// 根据配置构建存储后端（单盘文件系统 / 本地纠删码 / 分布式集群）
-	st, stopStore, err := buildStore(cfg, logger)
+	stack, err := buildStore(cfg, logger)
 	if err != nil {
 		logger.Error("[gos3: store-init-failed]", "error", err.Error())
 		return 1
 	}
-	defer stopStore()
+	defer stack.stop()
+	st := stack.store
 
 	// 初始化 IAM 凭据存储，注入 root 用户凭据
 	iamStore, err := iam.New(cfg.IAMDir, auth.Credentials{AccessKey: cfg.RootUser, SecretKey: cfg.RootPass}, logger)
@@ -136,8 +141,8 @@ func runServer(args []string) int {
 		logger.Error("[gos3: iam-init-failed]", "error", err.Error())
 		return 1
 	}
-	// 创建 S3 服务实例，并取其 HTTP 处理器
-	srv := server.New(cfg, st, iamStore, logger)
+	// 创建 S3 服务实例，并取其 HTTP 处理器（健康端点使用集群健康视图）
+	srv := server.New(cfg, st, iamStore, logger, stack.health)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Address,
@@ -152,6 +157,17 @@ func runServer(args []string) int {
 	// 后台任务：清理过期分片上传、执行生命周期规则
 	go cleanupLoop(ctx, st, logger)
 	go lifecycleLoop(ctx, st, logger, cfg.ScanInterval)
+	// 后台任务：盘健康探测 + 最小自愈（分片重建）
+	if stack.monitor != nil {
+		go stack.monitor.Run(ctx)
+	}
+	if stack.erasure != nil && stack.healer != nil {
+		gate := func(int) bool { return true }
+		if stack.monitor != nil {
+			gate = stack.monitor.Online
+		}
+		go stack.healer.Run(ctx, stack.erasure, gate)
+	}
 
 	// 用于把 HTTP 服务的致命错误传回主 goroutine
 	errCh := make(chan error, 1)
@@ -188,36 +204,72 @@ func runServer(args []string) int {
 }
 
 // buildStore 根据配置选择合适的存储后端。
-// 返回存储实例、关闭函数以及错误。
-func buildStore(cfg config.Config, logger *slog.Logger) (store.Store, func(), error) {
+// storeStack 汇总启动后的存储与健康组件：
+// store 是对外使用的存储后端，monitor/healer/health 负责健康检查与最小自愈
+// （单盘 FS 模式没有盘级监控，health 退化为「永远就绪」）。
+type storeStack struct {
+	store   store.Store
+	erasure *store.Erasure
+	monitor *health.Monitor
+	healer  *heal.Queue
+	health  *health.Cluster
+	stop    func()
+}
+
+// buildStore 根据配置选择合适的存储后端，并组装健康探测 + 修复队列。
+func buildStore(cfg config.Config, logger *slog.Logger) (*storeStack, error) {
+	healer := heal.NewQueue(logger)
 	// 未配置 peers：本地模式
 	if len(cfg.Peers) == 0 {
 		// 只有一个数据目录时使用简单的文件系统后端
 		if len(cfg.DataDirs) == 1 {
 			st, err := store.NewFS(cfg.DataDirs[0], logger)
-			return st, func() {}, err
+			if err != nil {
+				return nil, err
+			}
+			return &storeStack{store: st, health: health.NewCluster(nil, 1, 1, nil, nil), stop: func() {}}, nil
 		}
 		// 多个本地目录时使用纠删码：先计算数据/校验分片数
 		dataShards, parityShards, err := layout(len(cfg.DataDirs), cfg.DataShards, cfg.ParityShards)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		// 每个目录封装为一个本地磁盘
 		disks := make([]disk.Disk, len(cfg.DataDirs))
 		for i, dir := range cfg.DataDirs {
 			d, err := disk.NewLocal(fmt.Sprintf("local/%d", i), dir)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			disks[i] = d
 		}
-		st, err := store.NewErasure(disks, dataShards, parityShards, logger)
-		return st, func() {}, err
+		// 布局固化：本地多盘同样写入并校验 format.json
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := format.Bootstrap(ctx, disks, true, logger, time.Second); err != nil {
+			return nil, err
+		}
+		// 单机模式：锁退化为进程内互斥，但走同一条代码路径
+		locker := lock.NewSingleNode("local", logger)
+		st, err := store.NewErasure(disks, dataShards, parityShards, logger, locker, healer)
+		if err != nil {
+			return nil, err
+		}
+		monitor := health.NewMonitor("local", localTargets(disks), logger)
+		return &storeStack{
+			store:   st,
+			erasure: st,
+			monitor: monitor,
+			healer:  healer,
+			health: health.NewCluster(monitor,
+				store.ReadQuorum(dataShards), store.WriteQuorum(dataShards, parityShards), nil, healer.Len),
+			stop: func() {},
+		}, nil
 	}
 
 	// 分布式模式必须提供对外可达的 gRPC 地址
 	if cfg.Advertise == "" {
-		return nil, nil, errors.New("distributed mode requires -advertise")
+		return nil, errors.New("distributed mode requires -advertise")
 	}
 	// 构建集群（含内部 gRPC 通信），最多等待 90 秒
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -232,20 +284,55 @@ func buildStore(cfg config.Config, logger *slog.Logger) (store.Store, func(), er
 		DialTimeout: 90 * time.Second,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// 基于集群所有磁盘计算纠删码布局
 	dataShards, parityShards, err := layout(len(cl.Disks()), cfg.DataShards, cfg.ParityShards)
 	if err != nil {
 		cl.Close()
-		return nil, nil, err
+		return nil, err
 	}
-	st, err := store.NewErasure(cl.Disks(), dataShards, parityShards, logger)
+	// 命名空间锁：向集群所有在线节点申请，用于串行化同一 key 的并发写
+	locker := lock.NewDRWMutex(cfg.Advertise, cl.Lockers(), logger)
+	st, err := store.NewErasure(cl.Disks(), dataShards, parityShards, logger, locker, healer)
 	if err != nil {
 		cl.Close()
-		return nil, nil, err
+		return nil, err
 	}
-	return st, cl.Close, nil
+	// 健康视图：盘级探测 + peer 在线状态 + 法定人数
+	monitor := health.NewMonitor(cfg.Advertise, cl.HealthTargets(), logger)
+	peers := func() []health.PeerInfo {
+		states := cl.Peers().States()
+		out := make([]health.PeerInfo, 0, len(states))
+		for _, s := range states {
+			out = append(out, health.PeerInfo{
+				Addr:         s.Addr,
+				Advertise:    s.Advertise,
+				Online:       s.Online,
+				LastSeen:     s.LastSeen,
+				DeploymentID: s.DeploymentID,
+			})
+		}
+		return out
+	}
+	return &storeStack{
+		store:   st,
+		erasure: st,
+		monitor: monitor,
+		healer:  healer,
+		health: health.NewCluster(monitor,
+			store.ReadQuorum(dataShards), store.WriteQuorum(dataShards, parityShards), peers, healer.Len),
+		stop: cl.Close,
+	}, nil
+}
+
+// localTargets 把本地盘封装成健康探测目标。
+func localTargets(disks []disk.Disk) []health.Target {
+	out := make([]health.Target, len(disks))
+	for i, d := range disks {
+		out[i] = health.Target{Disk: d}
+	}
+	return out
 }
 
 // layout 根据磁盘总数和用户指定的分片数，计算最终的数据分片与校验分片配置。

@@ -19,9 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	DiskService_Info_FullMethodName       = "/disk.DiskService/Info"
 	DiskService_ReadFile_FullMethodName   = "/disk.DiskService/ReadFile"
 	DiskService_WriteFile_FullMethodName  = "/disk.DiskService/WriteFile"
+	DiskService_Rename_FullMethodName     = "/disk.DiskService/Rename"
 	DiskService_DeleteFile_FullMethodName = "/disk.DiskService/DeleteFile"
 	DiskService_DeleteDir_FullMethodName  = "/disk.DiskService/DeleteDir"
 	DiskService_MakeDir_FullMethodName    = "/disk.DiskService/MakeDir"
@@ -34,17 +34,22 @@ const (
 // DiskServiceClient is the client API for DiskService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// DiskService 是磁盘级数据面：每个 RPC 都作用在「某一块盘」上。
+// 节点级信息（成员/布局/存活）在 PeerService（internal/peer）。
 type DiskServiceClient interface {
-	Info(ctx context.Context, in *NodeInfoRequest, opts ...grpc.CallOption) (*NodeInfo, error)
 	ReadFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*FileResponse, error)
 	WriteFile(ctx context.Context, in *WriteRequest, opts ...grpc.CallOption) (*Empty, error)
+	// Rename 是「临时写入 -> 提交」两阶段写的提交动作，必须原子。
+	Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*Empty, error)
 	DeleteFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*Empty, error)
 	DeleteDir(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*Empty, error)
 	MakeDir(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*Empty, error)
 	Stat(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*StatResponse, error)
 	ListDir(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*DirResponse, error)
 	Walk(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*WalkResponse, error)
-	Health(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
+	// Health 探测单块盘的可用性（drive 指定下标）。
+	Health(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type diskServiceClient struct {
@@ -53,16 +58,6 @@ type diskServiceClient struct {
 
 func NewDiskServiceClient(cc grpc.ClientConnInterface) DiskServiceClient {
 	return &diskServiceClient{cc}
-}
-
-func (c *diskServiceClient) Info(ctx context.Context, in *NodeInfoRequest, opts ...grpc.CallOption) (*NodeInfo, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(NodeInfo)
-	err := c.cc.Invoke(ctx, DiskService_Info_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 func (c *diskServiceClient) ReadFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*FileResponse, error) {
@@ -79,6 +74,16 @@ func (c *diskServiceClient) WriteFile(ctx context.Context, in *WriteRequest, opt
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Empty)
 	err := c.cc.Invoke(ctx, DiskService_WriteFile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *diskServiceClient) Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, DiskService_Rename_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +150,7 @@ func (c *diskServiceClient) Walk(ctx context.Context, in *FileRequest, opts ...g
 	return out, nil
 }
 
-func (c *diskServiceClient) Health(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
+func (c *diskServiceClient) Health(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Empty)
 	err := c.cc.Invoke(ctx, DiskService_Health_FullMethodName, in, out, cOpts...)
@@ -158,17 +163,22 @@ func (c *diskServiceClient) Health(ctx context.Context, in *Empty, opts ...grpc.
 // DiskServiceServer is the server API for DiskService service.
 // All implementations must embed UnimplementedDiskServiceServer
 // for forward compatibility.
+//
+// DiskService 是磁盘级数据面：每个 RPC 都作用在「某一块盘」上。
+// 节点级信息（成员/布局/存活）在 PeerService（internal/peer）。
 type DiskServiceServer interface {
-	Info(context.Context, *NodeInfoRequest) (*NodeInfo, error)
 	ReadFile(context.Context, *FileRequest) (*FileResponse, error)
 	WriteFile(context.Context, *WriteRequest) (*Empty, error)
+	// Rename 是「临时写入 -> 提交」两阶段写的提交动作，必须原子。
+	Rename(context.Context, *RenameRequest) (*Empty, error)
 	DeleteFile(context.Context, *FileRequest) (*Empty, error)
 	DeleteDir(context.Context, *FileRequest) (*Empty, error)
 	MakeDir(context.Context, *FileRequest) (*Empty, error)
 	Stat(context.Context, *FileRequest) (*StatResponse, error)
 	ListDir(context.Context, *FileRequest) (*DirResponse, error)
 	Walk(context.Context, *FileRequest) (*WalkResponse, error)
-	Health(context.Context, *Empty) (*Empty, error)
+	// Health 探测单块盘的可用性（drive 指定下标）。
+	Health(context.Context, *FileRequest) (*Empty, error)
 	mustEmbedUnimplementedDiskServiceServer()
 }
 
@@ -179,14 +189,14 @@ type DiskServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedDiskServiceServer struct{}
 
-func (UnimplementedDiskServiceServer) Info(context.Context, *NodeInfoRequest) (*NodeInfo, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Info not implemented")
-}
 func (UnimplementedDiskServiceServer) ReadFile(context.Context, *FileRequest) (*FileResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReadFile not implemented")
 }
 func (UnimplementedDiskServiceServer) WriteFile(context.Context, *WriteRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method WriteFile not implemented")
+}
+func (UnimplementedDiskServiceServer) Rename(context.Context, *RenameRequest) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Rename not implemented")
 }
 func (UnimplementedDiskServiceServer) DeleteFile(context.Context, *FileRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteFile not implemented")
@@ -206,7 +216,7 @@ func (UnimplementedDiskServiceServer) ListDir(context.Context, *FileRequest) (*D
 func (UnimplementedDiskServiceServer) Walk(context.Context, *FileRequest) (*WalkResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Walk not implemented")
 }
-func (UnimplementedDiskServiceServer) Health(context.Context, *Empty) (*Empty, error) {
+func (UnimplementedDiskServiceServer) Health(context.Context, *FileRequest) (*Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Health not implemented")
 }
 func (UnimplementedDiskServiceServer) mustEmbedUnimplementedDiskServiceServer() {}
@@ -228,24 +238,6 @@ func RegisterDiskServiceServer(s grpc.ServiceRegistrar, srv DiskServiceServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&DiskService_ServiceDesc, srv)
-}
-
-func _DiskService_Info_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(NodeInfoRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DiskServiceServer).Info(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DiskService_Info_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DiskServiceServer).Info(ctx, req.(*NodeInfoRequest))
-	}
-	return interceptor(ctx, in, info, handler)
 }
 
 func _DiskService_ReadFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -280,6 +272,24 @@ func _DiskService_WriteFile_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DiskServiceServer).WriteFile(ctx, req.(*WriteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DiskService_Rename_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenameRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DiskServiceServer).Rename(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DiskService_Rename_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DiskServiceServer).Rename(ctx, req.(*RenameRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -393,7 +403,7 @@ func _DiskService_Walk_Handler(srv interface{}, ctx context.Context, dec func(in
 }
 
 func _DiskService_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Empty)
+	in := new(FileRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -405,7 +415,7 @@ func _DiskService_Health_Handler(srv interface{}, ctx context.Context, dec func(
 		FullMethod: DiskService_Health_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DiskServiceServer).Health(ctx, req.(*Empty))
+		return srv.(DiskServiceServer).Health(ctx, req.(*FileRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -418,16 +428,16 @@ var DiskService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*DiskServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "Info",
-			Handler:    _DiskService_Info_Handler,
-		},
-		{
 			MethodName: "ReadFile",
 			Handler:    _DiskService_ReadFile_Handler,
 		},
 		{
 			MethodName: "WriteFile",
 			Handler:    _DiskService_WriteFile_Handler,
+		},
+		{
+			MethodName: "Rename",
+			Handler:    _DiskService_Rename_Handler,
 		},
 		{
 			MethodName: "DeleteFile",
