@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -108,9 +109,23 @@ func runServer(args []string) int {
 		cfg.IAMDir = filepath.Join(cfg.DataDir, ".iam")
 	}
 
-	// 构建带上下文的文本日志器，输出到标准输出，级别为 Info
+	// 持久化日志：写到主数据目录下的 <dataDir>/.gos3.sys/gos3.log，随 docker 卷保留，
+	// 便于容器重建后回查；同时保留 stdout 方便实时观察。打不开时退化为只写 stdout。
+	logPath := filepath.Join(cfg.DataDir, ".gos3.sys", "gos3.log")
+	logFile, err := openLogFile(logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: persistent log disabled: %v\n", err)
+		logFile, logPath = nil, ""
+	} else {
+		defer logFile.Close()
+	}
+	var logOut io.Writer = os.Stdout
+	if logFile != nil {
+		logOut = io.MultiWriter(os.Stdout, logFile)
+	}
+	// 构建带上下文的文本日志器，级别为 Info
 	logger := slog.New(telemetry.ContextHandler{
-		Handler: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
+		Handler: slog.NewTextHandler(logOut, &slog.HandlerOptions{Level: slog.LevelInfo}),
 	})
 
 	// 初始化遥测（链路追踪等），并注册退出时的关闭回调
@@ -177,6 +192,7 @@ func runServer(args []string) int {
 			"drives", len(cfg.DataDirs),
 			"region", cfg.Region,
 			"root-user", cfg.RootUser,
+			"log-file", logPath,
 		)
 		// 监听失败（非正常关闭）时把错误写入通道
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -377,6 +393,14 @@ func splitPeers(s string) []string {
 		}
 	}
 	return out
+}
+
+// openLogFile 以追加方式打开持久化日志文件，必要时创建其父目录。
+func openLogFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 }
 
 // lifecycleLoop 按固定间隔周期性执行对象生命周期规则。
