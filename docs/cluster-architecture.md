@@ -126,7 +126,7 @@ flowchart TB
 | 服务 | 包 | 作用域 | 方法 |
 | --- | --- | --- | --- |
 | `DiskService` | `internal/disk` | **磁盘级**数据面 | `ReadFile` `WriteFile` `Rename` `DeleteFile` `DeleteDir` `MakeDir` `Stat` `ListDir` `Walk` `Health` |
-| `PeerService` | `internal/peer` | **节点级**控制面 | `Info`（地址/盘列表/部署 ID/布局摘要）、`Health`（存活） |
+| `PeerService` | `internal/peer` | **节点级**控制面 | `Info`（地址/盘列表/部署 ID/布局摘要）、`Health`（存活）、`GetIAM`/`ApplyIAM`（IAM 快照复制） |
 | `LockService` | `internal/lock` | **节点级**锁表 | `Lock` `Unlock` `RLock` `RUnlock` `Refresh` |
 
 - 所有磁盘操作统一经 `disk.Disk` 接口；`disk.Local` 直接落本机目录，`disk.Remote`
@@ -320,7 +320,7 @@ sequenceDiagram
 - 不实现 MinIO grid 的自研传输（WebSocket + msgp），继续用 gRPC。
 - 不做多 pool / 多集合、加权放置、rebalance、decommission。
 - 不做 SSE/KMS、跨站点复制、事件通知。
-- **IAM 各节点独立**，不跨集群复制。
+- **IAM 跨节点复制**：管理写后通过 `PeerService.ApplyIAM` 推送全量快照，后台每 10s 用 `GetIAM`/`ApplyIAM` 推拉对账；修订号大者覆盖、相等取并集（最终一致，非强一致）。
 - 不做 bitrot 深度扫描与后台全量愈合。
 - 分片数为整对象、内存内编解码，超大对象受内存与 gRPC 128 MiB 消息上限约束。
 

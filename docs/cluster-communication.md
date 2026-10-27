@@ -5,7 +5,7 @@
 核心结论：
 
 1. 节点间的三个 gRPC 服务跑在**同一个 `-grpc-address`（默认 `:9001`）**上：
-   - `peer.PeerService`（节点级控制面）：成员信息 `Info`、存活探测 `Health`；
+   - `peer.PeerService`（节点级控制面）：成员信息 `Info`、存活探测 `Health`、IAM 快照复制 `GetIAM`/`ApplyIAM`；
    - `lock.LockService`（节点级锁）：`Lock/Unlock/RLock/RUnlock/Refresh`，节点侧锁表；
    - `disk.DiskService`（磁盘级数据面）：对某一块盘的读写删列、`Rename`、盘级 `Health`。
 2. 数据面的发起方永远是 `*disk.Remote`（`internal/disk/remote.go`）：它把 `disk.Disk`
@@ -72,7 +72,7 @@ flowchart LR
 `internal/cluster/cluster.go:58`）。每个节点依次做：
 
 1. 本地目录封装为 `disk.Local`；启动自己的 gRPC server，注册**三个**服务：
-   `DiskService`（对本节点 `localDisks`）、`PeerService`（成员/健康）、`LockService`（锁表）。
+   `DiskService`（对本节点 `localDisks`）、`PeerService`（成员/健康/IAM 复制）、`LockService`（锁表）。
    此时**只监听，不主动连任何人**。
 2. 对 `-peers` 里的每个地址调用 `peer.Manager.Dial`：建连 + `PeerService.Info` 探测，
    失败则每秒重试，最长 90 秒（单次探测超时 2s）。
@@ -352,6 +352,7 @@ sequenceDiagram
 | `health.Monitor` | 15s | 每盘 `WriteFile`/`ReadFile`/`DeleteFile`（探针，超时 5s） | 翻转打 `disk-faulty`/`disk-online`；对端离线时跳过该节点的盘 |
 | `heal.Queue` | 2s（有任务时） | 其余盘 `ReadFile` + 目标盘 `WriteFile` | 读路径发现缺分片时入队；重建失败最多重试 5 次后放弃（`heal-give-up`） |
 | `lifecycleLoop` | `-scan-interval`（默认 1m） | `ListDir`/`Stat`/`ReadFile`/`Walk`/`DeleteObject` 全套 | 存在带规则的 bucket 时周期性跨节点列对象（quorum 归约）、删过期对象（两阶段写） |
+| `iamsync.Syncer` | 10s，且管理写后立即触发 | `PeerService.GetIAM` / `ApplyIAM` | 全量 IAM 快照推拉对账；修订号大者覆盖（删除可传播），相等取并集，保证节点收敛 |
 
 即：**即使没有客户端请求，集群也在按周期互发 gRPC。**
 
@@ -367,7 +368,7 @@ sequenceDiagram
 | `DiskService.Health` RPC | 否，当前**无调用方**（盘级探针走的是数据面读写删，不是这个 RPC） |
 | `PeerService.Health` RPC | **是**：`peer.Manager.ProbeLoop` 每 5s 调用一次 |
 | `LockService.*` RPC | **是**：写/删/完成分片上传前后各一轮（Lock → … → Unlock），持锁超过 10s 还会每 10s `Refresh` |
-| IAM 用户/策略管理（`/gos3/admin/*`） | 否，IAM 状态各节点独立，不复制 |
+| IAM 用户/策略管理（`/gos3/admin/*`） | **是**：本地落盘后立即 `ApplyIAM` 推送到所有在线 peer；后台每 10s 再 `GetIAM`/`ApplyIAM` 对账 |
 | S3 请求转发 | 不存在；客户端连哪个节点就由哪个节点处理，对端只被当作「磁盘」 |
 | 优雅退出 `cluster.Close` | 关闭到 peer 的 client conn + `grpcServer.Stop()`，不发送业务 RPC |
 

@@ -31,6 +31,9 @@ type Store struct {
 	policies map[string]Policy
 	root     auth.Credentials
 	log      *slog.Logger
+	// rev 是本地 IAM 状态的逻辑修订号：任何一次本地变更 +1，
+	// 跨节点复制时用于判断哪一侧更新（大者胜，相等则合并）。
+	rev uint64
 }
 
 func New(dir string, root auth.Credentials, log *slog.Logger) (*Store, error) {
@@ -45,7 +48,8 @@ func New(dir string, root auth.Credentials, log *slog.Logger) (*Store, error) {
 		return nil, err
 	}
 	s.load()
-	log.Info("[gos3: iam-ready]", "dir", dir, "users", len(s.users), "policies", len(s.policies))
+	s.loadRevision()
+	log.Info("[gos3: iam-ready]", "dir", dir, "users", len(s.users), "policies", len(s.policies), "revision", s.rev)
 	return s, nil
 }
 
@@ -75,8 +79,19 @@ func (s *Store) AddUser(u User) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 覆盖已有用户（例如改密码）时保留已绑定的策略：PUT 只更新凭据与状态，
+	// 不应在调用方未显式传入策略的情况下悄悄清空授权。
+	if len(u.Policies) == 0 {
+		if old, ok := s.users[u.AccessKey]; ok {
+			u.Policies = old.Policies
+		}
+	}
 	s.users[u.AccessKey] = u
-	return s.saveUsersLocked()
+	if err := s.saveUsersLocked(); err != nil {
+		return err
+	}
+	s.bumpRevLocked()
+	return nil
 }
 
 func (s *Store) RemoveUser(accessKey string) error {
@@ -86,7 +101,11 @@ func (s *Store) RemoveUser(accessKey string) error {
 		return ErrUserNotFound
 	}
 	delete(s.users, accessKey)
-	return s.saveUsersLocked()
+	if err := s.saveUsersLocked(); err != nil {
+		return err
+	}
+	s.bumpRevLocked()
+	return nil
 }
 
 func (s *Store) ListUsers() []User {
@@ -94,9 +113,20 @@ func (s *Store) ListUsers() []User {
 	defer s.mu.RUnlock()
 	out := make([]User, 0, len(s.users))
 	for _, u := range s.users {
-		out = append(out, u)
+		// 复制 Policies 切片，调用方编码时不会与 AttachPolicy 的 append 竞争。
+		c := u
+		c.Policies = append([]string(nil), u.Policies...)
+		out = append(out, c)
 	}
 	return out
+}
+
+// GetPolicy 返回指定策略文档；不存在时 ok=false。
+func (s *Store) GetPolicy(name string) (Policy, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.policies[name]
+	return p, ok
 }
 
 func (s *Store) SetPolicy(name string, p Policy) error {
@@ -106,14 +136,22 @@ func (s *Store) SetPolicy(name string, p Policy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.policies[name] = p
-	return s.savePoliciesLocked()
+	if err := s.savePoliciesLocked(); err != nil {
+		return err
+	}
+	s.bumpRevLocked()
+	return nil
 }
 
 func (s *Store) DeletePolicy(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.policies, name)
-	return s.savePoliciesLocked()
+	if err := s.savePoliciesLocked(); err != nil {
+		return err
+	}
+	s.bumpRevLocked()
+	return nil
 }
 
 func (s *Store) ListPolicies() []string {
@@ -143,7 +181,11 @@ func (s *Store) AttachPolicy(accessKey, policy string) error {
 	}
 	u.Policies = append(u.Policies, policy)
 	s.users[accessKey] = u
-	return s.saveUsersLocked()
+	if err := s.saveUsersLocked(); err != nil {
+		return err
+	}
+	s.bumpRevLocked()
+	return nil
 }
 
 func (s *Store) DetachPolicy(accessKey, policy string) error {
@@ -159,9 +201,16 @@ func (s *Store) DetachPolicy(accessKey, policy string) error {
 			kept = append(kept, p)
 		}
 	}
+	if len(kept) == len(u.Policies) {
+		return nil
+	}
 	u.Policies = kept
 	s.users[accessKey] = u
-	return s.saveUsersLocked()
+	if err := s.saveUsersLocked(); err != nil {
+		return err
+	}
+	s.bumpRevLocked()
+	return nil
 }
 
 func (s *Store) IsAllowed(accessKey, action, resource string) bool {

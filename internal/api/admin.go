@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -81,12 +82,17 @@ func (h *Handler) adminUsers(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		h.Logger.Info("[gos3: admin-user-put]", "access-key", q.Get("accessKey"))
+		h.replicateIAM(r.Context())
 		writeJSONStatus(w, http.StatusOK, map[string]string{"status": "ok"})
 	case http.MethodDelete:
-		if err := h.IAM.RemoveUser(r.URL.Query().Get("accessKey")); err != nil {
+		accessKey := r.URL.Query().Get("accessKey")
+		if err := h.IAM.RemoveUser(accessKey); err != nil {
 			writeAdminError(w, err)
 			return
 		}
+		h.Logger.Info("[gos3: admin-user-delete]", "access-key", accessKey)
+		h.replicateIAM(r.Context())
 		writeJSONStatus(w, http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -94,12 +100,22 @@ func (h *Handler) adminUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminPolicies 策略管理。
-//   - GET    /gos3/admin/policies           列出所有策略名
+//   - GET    /gos3/admin/policies           列出所有策略名；带 ?name= 返回该策略文档
 //   - PUT    /gos3/admin/policies?name=     新增/覆盖策略（请求体为策略 JSON）
 //   - DELETE /gos3/admin/policies?name=     删除策略
 func (h *Handler) adminPolicies(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// 带 name 时返回策略文档（供控制台回显/编辑），不带时返回策略名列表。
+		if name := r.URL.Query().Get("name"); name != "" {
+			p, ok := h.IAM.GetPolicy(name)
+			if !ok {
+				writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": iam.ErrPolicyNotFound.Error()})
+				return
+			}
+			writeJSONStatus(w, http.StatusOK, map[string]any{"name": name, "policy": p})
+			return
+		}
 		writeJSONStatus(w, http.StatusOK, h.IAM.ListPolicies())
 	case http.MethodPut:
 		name := r.URL.Query().Get("name")
@@ -117,12 +133,17 @@ func (h *Handler) adminPolicies(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		h.Logger.Info("[gos3: admin-policy-put]", "policy", name)
+		h.replicateIAM(r.Context())
 		writeJSONStatus(w, http.StatusOK, map[string]string{"status": "ok"})
 	case http.MethodDelete:
-		if err := h.IAM.DeletePolicy(r.URL.Query().Get("name")); err != nil {
+		name := r.URL.Query().Get("name")
+		if err := h.IAM.DeletePolicy(name); err != nil {
 			writeAdminError(w, err)
 			return
 		}
+		h.Logger.Info("[gos3: admin-policy-delete]", "policy", name)
+		h.replicateIAM(r.Context())
 		writeJSONStatus(w, http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -141,6 +162,8 @@ func (h *Handler) adminAttach(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, err)
 		return
 	}
+	h.Logger.Info("[gos3: admin-policy-attach]", "access-key", q.Get("accessKey"), "policy", q.Get("policy"))
+	h.replicateIAM(r.Context())
 	writeJSONStatus(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -156,7 +179,18 @@ func (h *Handler) adminDetach(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, err)
 		return
 	}
+	h.Logger.Info("[gos3: admin-policy-detach]", "access-key", q.Get("accessKey"), "policy", q.Get("policy"))
+	h.replicateIAM(r.Context())
 	writeJSONStatus(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// replicateIAM 把本次管理变更同步推送到其他节点。
+// 对端离线时只记日志，由后台周期对账兜底，管理请求仍然成功。
+func (h *Handler) replicateIAM(ctx context.Context) {
+	if h.IAMReplicator == nil {
+		return
+	}
+	h.IAMReplicator.Replicate(ctx)
 }
 
 func writeAdminError(w http.ResponseWriter, err error) {

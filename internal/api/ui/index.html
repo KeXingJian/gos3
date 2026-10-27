@@ -45,6 +45,23 @@
   .dot{width:8px;height:8px;border-radius:50%;background:#c9ced6}
   .conn.on .dot{background:var(--success)}
 
+  /* 登录页：仅在未认证时显示，认证逻辑仍是 HTTP Basic */
+  .app{display:none}
+  .app.show{display:flex}
+  .login-view{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(900px 500px at 50% -10%,#e8f0ff 0%,var(--bg) 60%)}
+  .login-view.hide{display:none}
+  .login-card{width:380px;max-width:100%;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 18px 48px rgba(16,24,40,.12);padding:28px}
+  .login-card .brand{padding:0 0 18px;border-bottom:none}
+  .login-card .brand-name{font-size:19px}
+  .login-card h2{margin:0 0 4px;font-size:20px;letter-spacing:-.2px}
+  .login-card>p{margin:0 0 20px;font-size:12.5px}
+  .field{display:block;margin-bottom:14px}
+  .field span{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  .field input{width:100%}
+  .login-foot{display:flex;align-items:center;gap:10px;margin-top:4px}
+  .login-error{flex:1;min-height:18px;color:var(--danger);font-size:12px;word-break:break-word}
+  .session{margin-left:auto;display:flex;align-items:center;gap:8px}
+
   .main{flex:1;min-width:0;display:flex;flex-direction:column}
   .topbar{display:flex;align-items:center;gap:16px;padding:16px 28px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5}
   .topbar h1{font-size:20px;margin:0;font-weight:700;letter-spacing:-.2px}
@@ -112,6 +129,24 @@
   .modal input{width:100%}
   .modal .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
 
+  .modal.wide{width:780px}
+  .chk{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:13px}
+  .chk input{width:15px;height:15px;margin:0;accent-color:var(--primary)}
+  .perm-grid{margin-top:14px;border:1px solid var(--border);border-radius:9px;overflow:hidden}
+  .perm-scroll{max-height:44vh;overflow:auto}
+  table.perm{font-size:13px}
+  table.perm th{padding:8px 12px;white-space:nowrap;line-height:1.35}
+  table.perm th small{display:block;font-weight:400;color:var(--muted);font-size:10.5px;letter-spacing:0}
+  table.perm th.c{text-align:center;width:78px}
+  table.perm td{padding:7px 12px}
+  table.perm td.c{text-align:center;width:78px}
+  table.perm input[type=checkbox]{width:16px;height:16px;margin:0;accent-color:var(--primary);cursor:pointer}
+  table.perm tbody tr:hover{background:var(--surface-2)}
+  .perm-note{margin-top:10px;font-size:12px;color:var(--muted);min-height:18px}
+  .perm-others{margin-top:12px;font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .chip.removable{padding-right:5px}
+  .chip.removable button{background:none;border:none;color:inherit;font-size:14px;line-height:1;padding:0 3px;cursor:pointer;opacity:.65}
+  .chip.removable button:hover{opacity:1}
   #status{position:fixed;right:24px;bottom:24px;z-index:50;max-width:420px;background:#1d2129;color:#fff;padding:11px 16px;border-radius:9px;box-shadow:var(--shadow);font-size:13px;opacity:0;transform:translateY(6px);pointer-events:none;transition:opacity .2s,transform .2s}
   #status.show{opacity:1;transform:none}
   #status.err{background:var(--danger)}
@@ -121,7 +156,26 @@
 </style>
 </head>
 <body>
-<div class="app">
+<div id="loginView" class="login-view">
+  <div class="login-card">
+    <div class="brand">
+      <span class="logo">g</span>
+      <div>
+        <div class="brand-name">gos3</div>
+        <div class="muted" style="font-size:12px">Object storage console</div>
+      </div>
+    </div>
+    <h2>登录</h2>
+    <p class="muted">使用管理凭据登录控制台</p>
+    <label class="field"><span>Access Key</span><input id="user" placeholder="access key" value="minioadmin" autocomplete="username"></label>
+    <label class="field"><span>Secret Key</span><input id="pass" type="password" placeholder="secret key" value="minioadmin" autocomplete="current-password"></label>
+    <div class="login-foot">
+      <div id="loginError" class="login-error"></div>
+      <button class="btn" onclick="connect()">Connect</button>
+    </div>
+  </div>
+</div>
+<div id="app" class="app">
   <aside class="sidebar">
     <div class="brand">
       <span class="logo">g</span>
@@ -153,10 +207,9 @@
         <h1 id="pageTitle">Buckets</h1>
         <div id="pageSub" class="sub">Object storage browser</div>
       </div>
-      <div id="login" class="login">
-        <input id="user" placeholder="access key" value="minioadmin" autocomplete="username" style="width:150px">
-        <input id="pass" type="password" placeholder="secret key" value="minioadmin" autocomplete="current-password" style="width:150px">
-        <button class="btn" onclick="connect()">Connect</button>
+      <div id="session" class="session">
+        <span class="badge on" id="sessionUser"></span>
+        <button class="ghost sm" onclick="logout()">Sign out</button>
       </div>
     </header>
 
@@ -204,12 +257,13 @@
         <div class="row">
           <input id="uAccess" placeholder="access key" style="width:180px">
           <input id="uSecret" placeholder="secret key" style="width:180px">
-          <input id="uPolicy" placeholder="policy name (optional)" style="width:200px">
           <button class="btn" onclick="addUser()">Add User</button>
+          <span class="muted">创建后点 Permissions 勾选可访问的桶</span>
+          <span class="spacer"></span>
           <button class="ghost" onclick="loadUsers()">Refresh</button>
         </div>
         <div class="card">
-          <div class="card-head"><span class="title">Users</span></div>
+          <div class="card-head"><span class="title">Users</span><span class="right muted" id="userCount"></span></div>
           <table>
             <thead><tr><th>Access key</th><th>Status</th><th>Policies</th><th></th></tr></thead>
             <tbody id="userRows"></tbody>
@@ -219,12 +273,16 @@
 
       <section id="tab-policies" class="panel">
         <div class="row">
-          <input id="pName" placeholder="policy name" style="width:220px">
+          <input id="pName" placeholder="policy name" list="policyNames" style="width:220px">
+          <datalist id="policyNames"></datalist>
           <button class="btn" onclick="savePolicy()">Save Policy</button>
           <button class="ghost" onclick="loadPolicies()">Refresh</button>
+          <span class="spacer"></span>
+          <input id="attachKey" placeholder="access key" style="width:160px">
+          <button class="ghost" onclick="attachEditedPolicy()">Attach to user</button>
         </div>
         <div class="card">
-          <div class="card-head"><span class="title">Policy document</span></div>
+          <div class="card-head"><span class="title">Policy document</span><span class="right muted">点下方策略名可载入编辑</span></div>
           <div class="card-body">
             <textarea id="pBody" rows="10" spellcheck="false">{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:ListBucket"],"Resource":["arn:aws:s3:::demo","arn:aws:s3:::demo/*"]}]}</textarea>
             <div id="policyList" class="row" style="margin-top:12px"></div>
@@ -264,6 +322,37 @@
     </div>
   </div>
 </div>
+<div id="permModal" class="overlay">
+  <div class="modal wide">
+    <h3>Permissions</h3>
+    <p>为 <b id="permUser"></b> 勾选每个桶允许的操作；保存后自动生成并绑定策略 <code id="permPolicy"></code>。</p>
+    <label class="chk"><input type="checkbox" id="permListAll"> <span>列出全部桶 <code>s3:ListAllMyBuckets</code>（控制台 / <code>aws s3 ls</code> 需要）</span></label>
+    <label class="chk"><input type="checkbox" id="permBucketAdmin"> <span>创建 / 删除桶 <code>s3:CreateBucket</code> <code>s3:DeleteBucket</code></span></label>
+    <div class="perm-grid">
+      <div class="perm-scroll">
+        <table class="perm">
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th class="c">列出<small>ListBucket</small></th>
+              <th class="c">读取<small>GetObject</small></th>
+              <th class="c">上传<small>PutObject</small></th>
+              <th class="c">删除<small>DeleteObject</small></th>
+              <th class="c"></th>
+            </tr>
+          </thead>
+          <tbody id="permRows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="permOthers" class="perm-others"></div>
+    <div id="permNote" class="perm-note"></div>
+    <div class="foot">
+      <button class="ghost" onclick="closePerm()">Cancel</button>
+      <button class="btn" onclick="savePerm()">Save permissions</button>
+    </div>
+  </div>
+</div>
 <div id="status"></div>
 
 <script>
@@ -299,15 +388,46 @@ async function api(method, path, body, raw) {
   return ct.indexOf('json') >= 0 ? res.json() : res.text();
 }
 
+function setLoginError(msg) {
+  document.getElementById('loginError').textContent = msg || '';
+}
+
 async function connect() {
-  creds = { user: document.getElementById('user').value, pass: document.getElementById('pass').value };
+  const user = document.getElementById('user').value.trim();
+  const pass = document.getElementById('pass').value;
+  if (!user || !pass) { setLoginError('access key and secret key are required'); return; }
+  setLoginError('');
+  creds = { user, pass };
   try {
+    // 仍用 admin API 的 HTTP Basic 校验登录，成功后仅在前端切换视图
     await api('GET', '/gos3/admin/buckets');
+    document.getElementById('loginView').classList.add('hide');
+    document.getElementById('app').classList.add('show');
     document.getElementById('connState').classList.add('on');
-    document.getElementById('connText').textContent = 'connected as ' + creds.user;
-    setStatus('connected as ' + creds.user, 'ok');
+    document.getElementById('connText').textContent = 'connected as ' + user;
+    document.getElementById('sessionUser').textContent = user;
     loadBuckets(); loadUsers(); loadPolicies();
-  } catch (e) { setStatus(String(e.message || e), 'err'); }
+  } catch (e) {
+    creds = null;
+    setLoginError(String(e.message || e));
+  }
+}
+
+function logout() {
+  creds = null;
+  document.getElementById('pass').value = '';
+  document.getElementById('app').classList.remove('show');
+  document.getElementById('loginView').classList.remove('hide');
+  document.getElementById('connState').classList.remove('on');
+  document.getElementById('connText').textContent = 'not connected';
+  document.getElementById('sessionUser').textContent = '';
+  document.getElementById('bucketList').innerHTML = '';
+  document.getElementById('objectRows').innerHTML = '';
+  document.getElementById('userRows').innerHTML = '';
+  document.getElementById('policyList').innerHTML = '';
+  currentBucket = null;
+  setLoginError('');
+  document.getElementById('user').focus();
 }
 
 function tab(name) {
@@ -494,18 +614,25 @@ async function loadUsers() {
     const users = await api('GET', '/gos3/admin/users');
     const tb = document.getElementById('userRows');
     tb.innerHTML = '';
+    document.getElementById('userCount').textContent = (users || []).length + ' total';
     if (!users || !users.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">no users</td></tr>'; return; }
     users.forEach(u => {
       const pols = (u.policies || []).map(p => '<span class="chip">' + esc(p) + '</span>').join('') || '<span class="muted">none</span>';
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td><b>' + esc(u.accessKey) + '</b></td><td><span class="badge on">' + esc(u.status) + '</span></td><td>' + pols + '</td>';
+      const on = u.status === 'enabled';
+      tr.innerHTML = '<td><b>' + esc(u.accessKey) + '</b></td><td><span class="badge' + (on ? ' on' : '') + '">' + esc(u.status) +
+        '</span></td><td>' + pols + '</td>';
       const td = document.createElement('td');
+      const box = document.createElement('div'); box.className = 'acts';
+      const perm = document.createElement('button'); perm.className = 'ghost sm'; perm.textContent = 'Permissions';
+      perm.onclick = () => openPerm(u.accessKey);
       const rm = document.createElement('button'); rm.className = 'danger sm'; rm.textContent = 'Remove';
       rm.onclick = async () => {
+        if (!confirm('删除用户 ' + u.accessKey + '？策略绑定会随之移除（策略本身保留）。')) return;
         try { await api('DELETE', '/gos3/admin/users?accessKey=' + encodeURIComponent(u.accessKey)); setStatus('user removed', 'ok'); loadUsers(); }
         catch (e) { setStatus(String(e.message || e), 'err'); }
       };
-      td.appendChild(rm); tr.appendChild(td); tb.appendChild(tr);
+      box.appendChild(perm); box.appendChild(rm); td.appendChild(box); tr.appendChild(td); tb.appendChild(tr);
     });
   } catch (e) { setStatus(String(e.message || e), 'err'); }
 }
@@ -513,14 +640,13 @@ async function loadUsers() {
 async function addUser() {
   const ak = document.getElementById('uAccess').value.trim();
   const sk = document.getElementById('uSecret').value.trim();
-  const pol = document.getElementById('uPolicy').value.trim();
   if (!ak || !sk) { setStatus('access + secret required', 'err'); return; }
   try {
     await api('PUT', '/gos3/admin/users?accessKey=' + encodeURIComponent(ak) + '&secretKey=' + encodeURIComponent(sk));
-    if (pol) await api('PUT', '/gos3/admin/attach?accessKey=' + encodeURIComponent(ak) + '&policy=' + encodeURIComponent(pol));
-    setStatus('user saved', 'ok');
     document.getElementById('uAccess').value = ''; document.getElementById('uSecret').value = '';
-    loadUsers();
+    setStatus('user saved: ' + ak, 'ok');
+    await loadUsers();
+    openPerm(ak); // 建完直接配权限，避免留下「能登录但什么都干不了」的账号
   } catch (e) { setStatus(String(e.message || e), 'err'); }
 }
 
@@ -528,13 +654,24 @@ async function loadPolicies() {
   try {
     const names = await api('GET', '/gos3/admin/policies');
     const el = document.getElementById('policyList');
-    el.innerHTML = '';
+    const dl = document.getElementById('policyNames');
+    el.innerHTML = ''; dl.innerHTML = '';
     (names || []).forEach(n => {
+      const opt = document.createElement('option'); opt.value = n; dl.appendChild(opt);
       const b = document.createElement('button'); b.className = 'ghost sm'; b.textContent = n;
-      b.onclick = async () => { try { setStatus('policy ' + n + ' (edit JSON and Save to update)', 'ok'); } catch (e) {} };
+      b.onclick = () => loadPolicyDoc(n);
       el.appendChild(b);
     });
     if (!names || !names.length) el.innerHTML = '<span class="muted">no policies</span>';
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function loadPolicyDoc(name) {
+  try {
+    const doc = await api('GET', '/gos3/admin/policies?name=' + encodeURIComponent(name));
+    document.getElementById('pName').value = name;
+    document.getElementById('pBody').value = JSON.stringify(doc.policy, null, 2);
+    setStatus('loaded policy ' + name, 'ok');
   } catch (e) { setStatus(String(e.message || e), 'err'); }
 }
 
@@ -542,13 +679,210 @@ async function savePolicy() {
   const name = document.getElementById('pName').value.trim();
   if (!name) { setStatus('policy name required', 'err'); return; }
   try {
-    JSON.parse(document.getElementById('pBody').value);
-    await api('PUT', '/gos3/admin/policies?name=' + encodeURIComponent(name), document.getElementById('pBody').value);
-    setStatus('policy saved', 'ok'); loadPolicies();
+    const doc = JSON.parse(document.getElementById('pBody').value);
+    await api('PUT', '/gos3/admin/policies?name=' + encodeURIComponent(name), JSON.stringify(doc));
+    setStatus('policy saved: ' + name, 'ok'); loadPolicies();
   } catch (e) { setStatus(String(e.message || e), 'err'); }
 }
 
-connect();
+async function attachEditedPolicy() {
+  const name = document.getElementById('pName').value.trim();
+  const ak = document.getElementById('attachKey').value.trim();
+  if (!name || !ak) { setStatus('policy name + access key required', 'err'); return; }
+  try {
+    await api('PUT', '/gos3/admin/attach?accessKey=' + encodeURIComponent(ak) + '&policy=' + encodeURIComponent(name));
+    setStatus('attached ' + name + ' to ' + ak, 'ok'); loadUsers();
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+/* ---------- 权限矩阵：按桶勾选，自动生成策略并绑定 ---------- */
+
+const PERM_FIELDS = ['list', 'read', 'write', 'del'];
+const PERM_LABELS = { list: '列出', read: '读取', write: '上传', del: '删除' };
+
+let permUser = null;
+let permBuckets = [];
+let permState = {};
+let permOthers = [];
+
+function uiPolicyName(ak) { return 'ui-' + ak; }
+
+function asList(v) { return v == null ? [] : (Array.isArray(v) ? v : [v]); }
+
+async function openPerm(ak) {
+  permUser = ak;
+  permBuckets = [];
+  permState = {};
+  permOthers = [];
+  document.getElementById('permUser').textContent = ak;
+  document.getElementById('permPolicy').textContent = uiPolicyName(ak);
+  document.getElementById('permListAll').checked = false;
+  document.getElementById('permBucketAdmin').checked = false;
+  document.getElementById('permModal').classList.add('show');
+  try {
+    const buckets = await api('GET', '/gos3/admin/buckets');
+    permBuckets = (buckets || []).map(b => b.name);
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+  try {
+    const doc = await api('GET', '/gos3/admin/policies?name=' + encodeURIComponent(uiPolicyName(ak)));
+    applyPolicyToState(doc.policy);
+  } catch (e) { /* 404：还没为这个用户生成过策略 */ }
+  Object.keys(permState).forEach(b => { if (permBuckets.indexOf(b) < 0) permBuckets.push(b); });
+  try {
+    const users = await api('GET', '/gos3/admin/users');
+    const u = (users || []).find(x => x.accessKey === ak);
+    permOthers = ((u && u.policies) || []).filter(p => p !== uiPolicyName(ak));
+  } catch (e) { /* ignore */ }
+  renderPerm();
+  renderPermOthers();
+}
+
+function closePerm() {
+  document.getElementById('permModal').classList.remove('show');
+  permUser = null;
+}
+
+function applyPolicyToState(policy) {
+  const sts = (policy && policy.Statement) ? asList(policy.Statement) : [];
+  sts.forEach(st => {
+    if (String(st.Effect || '').toLowerCase() !== 'allow') return;
+    asList(st.Action).forEach(a => {
+      const act = String(a).toLowerCase();
+      if (act === 's3:listallmybuckets') { document.getElementById('permListAll').checked = true; return; }
+      if (act === 's3:createbucket' || act === 's3:deletebucket') { document.getElementById('permBucketAdmin').checked = true; return; }
+      const field = act === 's3:listbucket' ? 'list'
+        : (act === 's3:getobject' || act === 's3:getobjectversion') ? 'read'
+        : (act === 's3:putobject' || act === 's3:listmultipartuploadparts') ? 'write'
+        : (act === 's3:deleteobject' || act === 's3:abortmultipartupload') ? 'del' : '';
+      if (!field) return;
+      asList(st.Resource).forEach(r => {
+        const m = String(r).match(/^arn:aws:s3:::(.+?)(\/\*)?$/);
+        if (!m || m[1] === '*') return;
+        const bucket = m[1];
+        if (!permState[bucket]) permState[bucket] = {};
+        if (!permState[bucket][field]) permState[bucket][field] = true;
+      });
+    });
+  });
+}
+
+function buildPolicy() {
+  const st = [];
+  if (document.getElementById('permListAll').checked) {
+    st.push({ Effect: 'Allow', Action: ['s3:ListAllMyBuckets'], Resource: ['*'] });
+  }
+  if (document.getElementById('permBucketAdmin').checked) {
+    st.push({ Effect: 'Allow', Action: ['s3:CreateBucket', 's3:DeleteBucket'], Resource: ['*'] });
+  }
+  permBuckets.forEach(b => {
+    const s = permState[b] || {};
+    const actions = [];
+    const resources = [];
+    const bucketRes = 'arn:aws:s3:::' + b;
+    const objRes = bucketRes + '/*';
+    // 列出权限补齐 SDK 建连时的预检动作，否则 GET /bucket?location 等会 403
+    if (s.list) {
+      actions.push('s3:ListBucket', 's3:GetBucketLocation', 's3:GetBucketVersioning', 's3:ListBucketMultipartUploads');
+      if (resources.indexOf(bucketRes) < 0) resources.push(bucketRes);
+    }
+    if (s.read) { actions.push('s3:GetObject'); if (resources.indexOf(objRes) < 0) resources.push(objRes); }
+    if (s.write) { actions.push('s3:PutObject', 's3:ListMultipartUploadParts'); if (resources.indexOf(objRes) < 0) resources.push(objRes); }
+    if (s.del) { actions.push('s3:DeleteObject', 's3:AbortMultipartUpload'); if (resources.indexOf(objRes) < 0) resources.push(objRes); }
+    if (!actions.length) return;
+    st.push({ Effect: 'Allow', Action: Array.from(new Set(actions)), Resource: resources });
+  });
+  return { Version: '2012-10-17', Statement: st };
+}
+
+function renderPerm() {
+  const tb = document.getElementById('permRows');
+  tb.innerHTML = '';
+  if (!permBuckets.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty">还没有桶，先去 Buckets 页创建一个</td></tr>';
+  }
+  permBuckets.forEach(b => {
+    if (!permState[b]) permState[b] = {};
+    const s = permState[b];
+    const tr = document.createElement('tr');
+    const nameTd = document.createElement('td');
+    nameTd.innerHTML = '<b>' + esc(b) + '</b>';
+    tr.appendChild(nameTd);
+    PERM_FIELDS.forEach(k => {
+      const td = document.createElement('td'); td.className = 'c';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!s[k];
+      cb.title = PERM_LABELS[k];
+      cb.onchange = () => { s[k] = cb.checked; renderPermNote(); };
+      td.appendChild(cb); tr.appendChild(td);
+    });
+    const actTd = document.createElement('td'); actTd.className = 'c';
+    const all = document.createElement('button'); all.className = 'ghost sm';
+    const full = s.list && s.read && s.write && s.del;
+    all.textContent = full ? '清空' : '全选';
+    all.onclick = () => {
+      const v = !full;
+      s.list = s.read = s.write = s.del = v;
+      renderPerm();
+    };
+    actTd.appendChild(all); tr.appendChild(actTd);
+    tb.appendChild(tr);
+  });
+  renderPermNote();
+}
+
+function renderPermNote() {
+  const count = buildPolicy().Statement.length;
+  const el = document.getElementById('permNote');
+  el.textContent = count === 0
+    ? '未选择任何权限：保存后该用户能登录，但所有 S3 请求都会 403 AccessDenied。'
+    : '将生成 ' + count + ' 条 Allow 语句，保存时覆盖策略 ' + uiPolicyName(permUser || '') + ' 并绑定。';
+}
+
+function renderPermOthers() {
+  const el = document.getElementById('permOthers');
+  el.innerHTML = '';
+  if (!permOthers.length) return;
+  const label = document.createElement('span');
+  label.textContent = '其他已绑定策略：';
+  el.appendChild(label);
+  permOthers.forEach(p => {
+    const chip = document.createElement('span'); chip.className = 'chip removable';
+    const name = document.createElement('span'); name.textContent = p;
+    const x = document.createElement('button'); x.type = 'button'; x.textContent = '×'; x.title = '解绑该策略';
+    x.onclick = async () => {
+      try {
+        await api('PUT', '/gos3/admin/detach?accessKey=' + encodeURIComponent(permUser) + '&policy=' + encodeURIComponent(p));
+        permOthers = permOthers.filter(q => q !== p);
+        renderPermOthers(); loadUsers(); setStatus('detached ' + p, 'ok');
+      } catch (e) { setStatus(String(e.message || e), 'err'); }
+    };
+    chip.appendChild(name); chip.appendChild(x); el.appendChild(chip);
+  });
+}
+
+async function savePerm() {
+  if (!permUser) return;
+  const name = uiPolicyName(permUser);
+  try {
+    await api('PUT', '/gos3/admin/policies?name=' + encodeURIComponent(name), JSON.stringify(buildPolicy()));
+    await api('PUT', '/gos3/admin/attach?accessKey=' + encodeURIComponent(permUser) + '&policy=' + encodeURIComponent(name));
+    setStatus('permissions saved for ' + permUser, 'ok');
+    closePerm();
+    loadUsers(); loadPolicies();
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+document.getElementById('permModal').addEventListener('click', e => {
+  if (e.target.id === 'permModal') closePerm();
+});
+document.getElementById('permListAll').addEventListener('change', renderPermNote);
+document.getElementById('permBucketAdmin').addEventListener('change', renderPermNote);
+
+['user', 'pass'].forEach(id => {
+  document.getElementById(id).addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); connect(); }
+  });
+});
+document.getElementById('user').focus();
 </script>
 </body>
 </html>

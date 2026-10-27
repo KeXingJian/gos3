@@ -23,6 +23,7 @@ import (
 	"github.com/kxj/gos3/internal/heal"
 	"github.com/kxj/gos3/internal/health"
 	"github.com/kxj/gos3/internal/iam"
+	"github.com/kxj/gos3/internal/iamsync"
 	"github.com/kxj/gos3/internal/lock"
 	"github.com/kxj/gos3/internal/server"
 	"github.com/kxj/gos3/internal/store"
@@ -156,8 +157,25 @@ func runServer(args []string) int {
 		logger.Error("[gos3: iam-init-failed]", "error", err.Error())
 		return 1
 	}
+	// 分布式模式：把 IAM 存储挂到节点控制面，并启动跨节点复制。
+	// 管理端写用户/策略后立即推送其余节点；后台周期对账兜底离线/后加入场景。
+	var iamSyncer *iamsync.Syncer
+	if stack.cl != nil {
+		stack.cl.SetIAM(iamStore)
+		iamSyncer = iamsync.New(iamStore, stack.cl.Peers(), logger)
+		// 启动时先同步一次，避免本节点带着过期 IAM 状态开始服务。
+		syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		iamSyncer.Sync(syncCtx)
+		cancel()
+		logger.Info("[gos3: iam-sync-ready]",
+			"peers", len(stack.cl.Peers().States()), "revision", iamStore.Revision())
+	}
+
 	// 创建 S3 服务实例，并取其 HTTP 处理器（健康端点使用集群健康视图）
 	srv := server.New(cfg, st, iamStore, logger, stack.health)
+	if iamSyncer != nil {
+		srv.SetIAMReplicator(iamSyncer)
+	}
 
 	httpServer := &http.Server{
 		Addr:              cfg.Address,
@@ -169,6 +187,10 @@ func runServer(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 后台任务：IAM 状态周期对账（单机模式为 nil）
+	if iamSyncer != nil {
+		go iamSyncer.Run(ctx)
+	}
 	// 后台任务：清理过期分片上传、执行生命周期规则
 	go cleanupLoop(ctx, st, logger)
 	go lifecycleLoop(ctx, st, logger, cfg.ScanInterval)
@@ -229,6 +251,7 @@ type storeStack struct {
 	monitor *health.Monitor
 	healer  *heal.Queue
 	health  *health.Cluster
+	cl      *cluster.Cluster // 分布式模式下的集群视图；单机模式为 nil
 	stop    func()
 }
 
@@ -338,6 +361,7 @@ func buildStore(cfg config.Config, logger *slog.Logger) (*storeStack, error) {
 		healer:  healer,
 		health: health.NewCluster(monitor,
 			store.ReadQuorum(dataShards), store.WriteQuorum(dataShards, parityShards), peers, healer.Len),
+		cl:   cl,
 		stop: cl.Close,
 	}, nil
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -29,9 +30,16 @@ type HealthReporter interface {
 	Ready() bool
 }
 
+// IAMReplicator 把本地 IAM 变更复制到集群其他节点（实现见 internal/iamsync）。
+// 为 nil 时表示单机模式，不需要复制。
+type IAMReplicator interface {
+	Replicate(ctx context.Context)
+}
+
 type Handler struct {
 	Store         store.Store
 	IAM           *iam.Store
+	IAMReplicator IAMReplicator
 	ClusterHealth HealthReporter
 	Region        string
 	OwnerID       string

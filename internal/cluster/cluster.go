@@ -38,6 +38,7 @@ type Options struct {
 type Cluster struct {
 	disks      []disk.Disk        // 聚合后的全部磁盘（本地 + 远程），顺序全局一致
 	grpcServer *grpc.Server       // 本节点的 gRPC 服务（DiskService + PeerService + LockService）
+	peerSrv    *peer.Server       // 节点控制面：成员/健康/IAM 复制
 	peers      *peer.Manager      // 到各 peer 的连接与在线状态
 	lockers    []lock.NodeLocker  // 命名空间锁的节点集合（本节点 + 在线 peer）
 	diskSkips  []func() bool      // 与 disks 对应：远端盘所在节点离线时跳过健康探测
@@ -206,7 +207,7 @@ func Build(ctx context.Context, opts Options) (*Cluster, error) {
 		lockers = append(lockers, lock.NewRemoteNode(addr, conn, func() bool { return mgr.Online(addr) }))
 	}
 
-	return &Cluster{disks: disks, grpcServer: gs, peers: mgr, stopProbe: stopProbe, lockers: lockers, diskSkips: diskSkips, log: log}, nil
+	return &Cluster{disks: disks, grpcServer: gs, peerSrv: peerSrv, peers: mgr, stopProbe: stopProbe, lockers: lockers, diskSkips: diskSkips, log: log}, nil
 }
 
 // isFirstNode 判断本节点是否为地址集合中排序最靠前的节点（布局初始化者）。
@@ -274,6 +275,14 @@ func (c *Cluster) Disks() []disk.Disk {
 // Peers 返回 peer 连接管理器（在线状态、后续的分布式锁都走它）。
 func (c *Cluster) Peers() *peer.Manager {
 	return c.peers
+}
+
+// SetIAM 把本地 IAM 存储挂到节点控制面，使对端可以通过 GetIAM/ApplyIAM
+// 拉取或推送 IAM 快照。集群组建完成、IAM 存储初始化之后调用。
+func (c *Cluster) SetIAM(h peer.IAMHandler) {
+	if c.peerSrv != nil {
+		c.peerSrv.SetIAM(h)
+	}
 }
 
 // Lockers 返回节点级锁客户端集合（本节点 + 各 peer），供上层组装分布式读写锁。

@@ -26,9 +26,32 @@ message HealthResponse {
   bool ok = 1;
 }
 
-// PeerService 是节点级控制面（成员/健康，后续含分布式锁），
+// IAMRequest 携带调用方的 IAM 全量快照（JSON：用户 + 策略 + 修订号）。
+message IAMRequest {
+  bytes snapshot = 1;
+}
+
+message IAMResponse {
+  // 接收方合并快照后状态是否发生变化。
+  bool changed = 1;
+  // 接收方合并后的修订号。
+  uint64 revision = 2;
+}
+
+message GetIAMRequest {}
+
+message GetIAMResponse {
+  bytes snapshot = 1;
+  uint64 revision = 2;
+}
+
+// PeerService 是节点级控制面（成员/健康/IAM 复制），
 // 与磁盘级数据面 DiskService 共用同一个 gRPC server/端口。
 service PeerService {
   rpc Info(InfoRequest) returns (InfoResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
+  // GetIAM 返回本节点当前的 IAM 全量快照，供对端启动/重连时追平。
+  rpc GetIAM(GetIAMRequest) returns (GetIAMResponse);
+  // ApplyIAM 合并对端推送的 IAM 快照（按修订号决定覆盖还是合并）。
+  rpc ApplyIAM(IAMRequest) returns (IAMResponse);
 }

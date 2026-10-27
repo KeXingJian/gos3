@@ -112,7 +112,8 @@ flowchart LR
 | `internal/erasure` | Reed-Solomon 编解码（`klauspost/reedsolomon`） |
 | `internal/disk` | `Disk` 抽象：`Local` / `Remote`，及生成的 proto |
 | `internal/cluster` | gRPC 磁盘服务、对等发现、全局磁盘装配 |
-| `internal/iam` | 用户、策略、凭证 Provider、鉴权判定 |
+| `internal/iam` | 用户、策略、凭证 Provider、鉴权判定、快照与修订号 |
+| `internal/iamsync` | 节点间 IAM 全量快照复制（`PeerService.GetIAM`/`ApplyIAM`） |
 | `internal/lifecycle` | 生命周期配置模型与过期判定 |
 | `internal/telemetry` | OpenTelemetry 初始化（stdout/OTLP）与 context-aware slog |
 | `internal/api` | S3 处理器、Admin API、XML 响应、错误模型 |
@@ -149,7 +150,7 @@ flowchart LR
 - 纠删码为**整对象、内存内**编解码，超大对象受内存限制，gRPC 分片消息上限 128 MiB。
 - 纠删码布局（盘数、数据/校验片）启动时固定，未持久化到 `format.json`，读取需相同布局。
 - 集群成员静态配置，无分布式锁/选主，跨节点并发写同 key 不协调。
-- IAM 状态按节点存储，不跨集群复制；Admin API 为明文 Basic 认证。
+- IAM 为最终一致复制（全量快照 + 逻辑修订号，最后写入者胜）；Admin API 为明文 Basic 认证。
 - 生命周期仅支持 `Expiration`（Days/Date），无转换、非当前版本过期、标签/大小过滤。
 - 分片上传暂存仅在第一个全局盘，完成后才对整体对象纠删编码。
 - `ListObjectVersions` 分页支持 `key-marker`，但不支持 `version-id-marker`。

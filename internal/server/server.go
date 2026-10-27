@@ -41,6 +41,12 @@ func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
+// SetIAMReplicator 注入 IAM 复制器（单机模式不注入，保持 nil）。
+// 管理端写操作在本地落盘后，会通过它把变更推送到集群其他节点。
+func (s *Server) SetIAMReplicator(r api.IAMReplicator) {
+	s.api.IAMReplicator = r
+}
+
 // route 是 HTTP 路由总入口，按 URL 形态与方法分发到具体处理器。
 // 匹配顺序：管理接口 /gos3/admin/* -> 内置 UI -> 公开路径 -> 根路径 -> bucket/object。
 // 完整路由（S3 兼容）：
