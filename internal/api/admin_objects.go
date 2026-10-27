@@ -7,18 +7,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kxj/gos3/internal/auth"
 	"github.com/kxj/gos3/internal/sign"
 	"github.com/kxj/gos3/internal/store"
 )
 
 const maxPresignExpiry = 7 * 24 * 3600
 
-// adminPresign 生成对象下载的预签名 URL（使用 root 凭据签名）。
+// adminPresign 生成对象下载的预签名 URL（使用当前登录身份的凭据签名）。
 // GET /gos3/admin/presign?bucket=&object=[&expires=秒]
 // expires 默认 3600，范围 1..maxPresignExpiry（7 天）
 // 响应：200 JSON {"url": "...", "expires": N}
-func (h *Handler) adminPresign(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) adminPresign(w http.ResponseWriter, r *http.Request, sess adminSession) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -28,6 +27,13 @@ func (h *Handler) adminPresign(w http.ResponseWriter, r *http.Request) {
 	object := q.Get("object")
 	if bucket == "" || object == "" {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bucket and object are required"})
+		return
+	}
+	// 预签名 URL 的权限等同于当前身份的 s3:GetObject；普通用户只能签自己有权读的对象。
+	resource := "arn:aws:s3:::" + bucket + "/" + object
+	if !h.IAM.IsAllowed(sess.AccessKey, "s3:GetObject", resource) {
+		h.Logger.Warn("[gos3: admin-presign-denied]", "access-key", sess.AccessKey, "resource", resource)
+		WriteError(w, r, ErrAccessDenied)
 		return
 	}
 	expires := 3600
@@ -46,8 +52,7 @@ func (h *Handler) adminPresign(w http.ResponseWriter, r *http.Request) {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	creds := auth.Credentials{AccessKey: h.RootUser, SecretKey: h.RootPass}
-	link := sign.PresignGetURL(scheme, r.Host, "/"+bucket+"/"+object, creds, h.Region, time.Now(), time.Duration(expires)*time.Second)
+	link := sign.PresignGetURL(scheme, r.Host, "/"+bucket+"/"+object, sess.Credentials, h.Region, time.Now(), time.Duration(expires)*time.Second)
 	writeJSONStatus(w, http.StatusOK, map[string]any{"url": link, "expires": expires})
 }
 
@@ -105,6 +110,12 @@ func (h *Handler) serveAdminBuckets(w http.ResponseWriter, r *http.Request, rest
 		return
 	}
 
+	// 严格匹配 objects / objects/...；ServeAdmin 已先行拒绝未识别路由，
+	// 这里再兜一层，避免 /bucket/objectsfoo 被当成对象 "foo"。
+	if tail != "objects" && !strings.HasPrefix(tail, "objects/") {
+		http.NotFound(w, r)
+		return
+	}
 	tail = strings.TrimPrefix(tail, "objects")
 	tail = strings.TrimPrefix(tail, "/")
 	if tail == "" {

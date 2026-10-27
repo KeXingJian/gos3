@@ -16,6 +16,8 @@ func (h *Handler) ServeUI(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// 页面随二进制发布更新，禁止浏览器用旧副本（否则新登录逻辑可能不生效）。
+	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(uiIndexHTML)
 	return true

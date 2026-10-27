@@ -166,7 +166,7 @@
       </div>
     </div>
     <h2>登录</h2>
-    <p class="muted">使用管理凭据登录控制台</p>
+    <p class="muted">使用 root 或 IAM 用户凭据登录控制台</p>
     <label class="field"><span>Access Key</span><input id="user" placeholder="access key" value="minioadmin" autocomplete="username"></label>
     <label class="field"><span>Secret Key</span><input id="pass" type="password" placeholder="secret key" value="minioadmin" autocomplete="current-password"></label>
     <div class="login-foot">
@@ -186,12 +186,12 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
         Buckets
       </button>
-      <label>Identity</label>
-      <button data-tab="users" onclick="tab('users')">
+      <label data-admin-only>Identity</label>
+      <button data-tab="users" data-admin-only onclick="tab('users')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         Users
       </button>
-      <button data-tab="policies" onclick="tab('policies')">
+      <button data-tab="policies" data-admin-only onclick="tab('policies')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         Policies
       </button>
@@ -357,6 +357,7 @@
 
 <script>
 let creds = null;
+let isRoot = false;
 let currentBucket = null;
 let currentShareKey = null;
 let statusTimer = null;
@@ -399,22 +400,38 @@ async function connect() {
   setLoginError('');
   creds = { user, pass };
   try {
-    // 仍用 admin API 的 HTTP Basic 校验登录，成功后仅在前端切换视图
-    await api('GET', '/gos3/admin/buckets');
+    // whoami 只校验身份，不要求任何 S3 权限：普通 IAM 用户也能登录控制台。
+    const me = await api('GET', '/gos3/admin/whoami');
+    isRoot = !!me.root;
     document.getElementById('loginView').classList.add('hide');
     document.getElementById('app').classList.add('show');
     document.getElementById('connState').classList.add('on');
-    document.getElementById('connText').textContent = 'connected as ' + user;
-    document.getElementById('sessionUser').textContent = user;
-    loadBuckets(); loadUsers(); loadPolicies();
+    document.getElementById('connText').textContent = 'connected as ' + user + (isRoot ? ' (root)' : '');
+    document.getElementById('sessionUser').textContent = user + (isRoot ? ' · root' : '');
+    applyRole();
+    loadBuckets();
+    if (isRoot) { loadUsers(); loadPolicies(); }
   } catch (e) {
     creds = null;
+    isRoot = false;
     setLoginError(String(e.message || e));
+  }
+}
+
+// 普通 IAM 用户只显示对象浏览页；用户/策略管理仅 root 可见（后端也会再次校验）。
+function applyRole() {
+  document.querySelectorAll('[data-admin-only]').forEach(el => { el.style.display = isRoot ? '' : 'none'; });
+  if (!isRoot) {
+    const onAdminTab = document.getElementById('tab-users').classList.contains('active') ||
+      document.getElementById('tab-policies').classList.contains('active');
+    if (onAdminTab) tab('buckets');
   }
 }
 
 function logout() {
   creds = null;
+  isRoot = false;
+  applyRole();
   document.getElementById('pass').value = '';
   document.getElementById('app').classList.remove('show');
   document.getElementById('loginView').classList.remove('hide');
