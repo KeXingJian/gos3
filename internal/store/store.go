@@ -137,6 +137,10 @@ type Store interface {
 	ListObjects(ctx context.Context, bucket string, opts ListOptions) (ListObjectsResult, error)
 	ListObjectVersions(ctx context.Context, bucket string, opts ListOptions) (ListVersionsResult, error)
 
+	// WalkVersions 遍历 bucket 下所有对象的所有版本，逐个回调（供元数据索引全量重建）。
+	// 不排序、不分页，返回的是 sidecar 的权威元数据。
+	WalkVersions(ctx context.Context, bucket string, fn func(VersionInfo) error) error
+
 	NewMultipartUpload(ctx context.Context, bucket, object, contentType string, userMeta map[string]string) (string, error)
 	PutObjectPart(ctx context.Context, bucket, object, uploadID string, partNumber int, data io.Reader) (PartInfo, error)
 	ListObjectParts(ctx context.Context, bucket, object, uploadID string) ([]PartInfo, error)

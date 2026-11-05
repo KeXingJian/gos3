@@ -30,6 +30,11 @@ type Config struct {
 	MaxSkew           time.Duration
 	ReadHeaderTimeout time.Duration
 	ShutdownTimeout   time.Duration
+
+	// Catalog 启用元数据索引（默认 false，显式开启）
+	Catalog bool
+	// CatalogDir 索引目录（默认 <主数据目录>/.catalog）
+	CatalogDir string
 }
 
 func Default() Config {

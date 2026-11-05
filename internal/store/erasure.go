@@ -613,6 +613,24 @@ func (e *Erasure) ListObjectVersions(ctx context.Context, bucket string, opts Li
 	return buildVersionsResult(metas, bucket, opts), nil
 }
 
+func (e *Erasure) WalkVersions(ctx context.Context, bucket string, fn func(VersionInfo) error) error {
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	metas, err := e.walkMetasQuorum(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	for _, entry := range metas {
+		for i, v := range entry.meta.Versions {
+			if err := fn(VersionInfo{ObjectInfo: v.toInfo(bucket, entry.key), IsLatest: i == 0}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (e *Erasure) NewMultipartUpload(ctx context.Context, bucket, object, contentType string, userMeta map[string]string) (string, error) {
 	if !validBucketName(bucket) {
 		return "", ErrInvalidBucketName

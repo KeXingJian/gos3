@@ -756,6 +756,24 @@ func buildVersionsResult(metas []objectMetaEntry, bucket string, opts ListOption
 	return result
 }
 
+func (f *FS) WalkVersions(ctx context.Context, bucket string, fn func(VersionInfo) error) error {
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	metas, err := f.walkMetas(bucket)
+	if err != nil {
+		return err
+	}
+	for _, entry := range metas {
+		for i, v := range entry.meta.Versions {
+			if err := fn(VersionInfo{ObjectInfo: v.toInfo(bucket, entry.key), IsLatest: i == 0}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (f *FS) NewMultipartUpload(ctx context.Context, bucket, object, contentType string, userMeta map[string]string) (string, error) {
 	if !validBucketName(bucket) {
 		return "", ErrInvalidBucketName

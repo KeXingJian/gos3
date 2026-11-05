@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kxj/gos3/internal/auth"
+	"github.com/kxj/gos3/internal/catalog"
 	"github.com/kxj/gos3/internal/cluster"
 	"github.com/kxj/gos3/internal/config"
 	"github.com/kxj/gos3/internal/disk"
@@ -90,6 +91,8 @@ func runServer(args []string) int {
 	fs.StringVar(&cfg.GRPCAddress, "grpc-address", cfg.GRPCAddress, "internode gRPC listen address")
 	fs.StringVar(&cfg.Advertise, "advertise", "", "gRPC address other nodes use to reach this node")
 	fs.DurationVar(&cfg.ScanInterval, "scan-interval", cfg.ScanInterval, "lifecycle scan interval")
+	fs.BoolVar(&cfg.Catalog, "catalog", cfg.Catalog, "enable metadata catalog (index)")
+	fs.StringVar(&cfg.CatalogDir, "catalog-dir", "", "catalog index directory (default <data-dir>/.catalog)")
 	// peers 采用逗号分隔字符串，稍后再拆分为切片
 	peersFlag := fs.String("peers", "", "comma-separated peer gRPC addresses")
 	if err := fs.Parse(args); err != nil {
@@ -150,6 +153,27 @@ func runServer(args []string) int {
 	}
 	defer stack.stop()
 	st := stack.store
+
+	// 可选：启用元数据索引（Catalog），装饰 store，写路径异步投递索引事件
+	if cfg.Catalog {
+		catDir := cfg.CatalogDir
+		if catDir == "" {
+			catDir = filepath.Join(cfg.DataDir, ".catalog")
+		}
+		indexed, err := catalog.New(st, catalog.Config{
+			Dir:      catDir,
+			Wal:      catalog.WalConfig{Dir: catDir},
+			Index:    catalog.IndexConfig{},
+			SnapDocs: 1_000_000,
+		}, logger)
+		if err != nil {
+			logger.Error("[gos3: catalog-init-failed]", "error", err.Error())
+			return 1
+		}
+		defer indexed.Close()
+		st = indexed
+		logger.Info("[gos3: catalog-ready]", "dir", catDir, "docs", indexed.Engine().Status().Docs)
+	}
 
 	// 初始化 IAM 凭据存储，注入 root 用户凭据
 	iamStore, err := iam.New(cfg.IAMDir, auth.Credentials{AccessKey: cfg.RootUser, SecretKey: cfg.RootPass}, logger)
