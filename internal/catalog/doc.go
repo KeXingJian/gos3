@@ -11,18 +11,18 @@ import "time"
 
 // Doc 是索引文档，与一个对象版本（sidecar 的 fsVersion）一一对应。
 type Doc struct {
-	Bucket       string
-	Key          string
-	VersionID    string
-	IsLatest     bool
-	DeleteMarker bool
-	Size         int64
-	ETag         string
-	ContentType  string
-	ModTime      time.Time
-	UserMeta     map[string]string
-	Tags         map[string]string
-	Seq          uint64 // 全局单调事件号，写路径分配；不参与主键
+	Bucket       string            `json:"bucket"`
+	Key          string            `json:"key"`
+	VersionID    string            `json:"versionId"`
+	IsLatest     bool              `json:"isLatest"`
+	DeleteMarker bool              `json:"deleteMarker,omitempty"`
+	Size         int64             `json:"size"`
+	ETag         string            `json:"etag,omitempty"`
+	ContentType  string            `json:"contentType,omitempty"`
+	ModTime      time.Time         `json:"modTime"`
+	UserMeta     map[string]string `json:"userMeta,omitempty"`
+	Tags         map[string]string `json:"tags,omitempty"`
+	Seq          uint64            `json:"seq,omitempty"` // 全局单调事件号，写路径分配；不参与主键
 }
 
 // Op 是索引事件的操作类型。

@@ -9,7 +9,10 @@ import (
 
 const (
 	manifestFileName = "MANIFEST"
-	schemaVersion    = 1
+	// schemaVersion=2：重建时按「旧版本先 emit」分配 Seq，修正旧索引里
+	// 同一 key 的 Seq 顺序（最新版本必须 Seq 最大）。旧版本 manifest 会被
+	// 判定为不兼容并触发全量重建，不会带着错误的 Seq 继续服务。
+	schemaVersion = 2
 )
 
 // manifest 是目录下的唯一指针：记录当前 gen、已持久化 seq 与快照信息。

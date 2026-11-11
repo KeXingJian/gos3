@@ -148,10 +148,10 @@ flowchart LR
 GET  /gos3/admin/catalog/search
      ?bucket=&prefix=&contentType=&minSize=&maxSize=&after=&before=
      &meta.owner=alice&tag.env=prod&limit=100&token=<opaque>
-GET  /gos3/admin/catalog/stats?bucket=&groupBy=contentType|storageClass|sizeBucket
-POST /gos3/admin/catalog/sql      {"query":"SELECT key,size FROM S3Object WHERE size > 1048576 LIMIT 10"}
-POST /gos3/admin/catalog/reindex  {"bucket":"photos","full":true}
-GET  /gos3/admin/catalog/status   → {"docs":1234567,"appliedSeq":88,"lag":0,"dropped":0,"state":"ready"}
+GET  /gos3/admin/catalog/stats?bucket=&groupBy=bucket|contentType|sizeBucket
+POST /gos3/admin/catalog/sql      {"query":"SELECT key,size FROM S3Object WHERE size > 1048576 LIMIT 10"}  // C5
+POST /gos3/admin/catalog/reindex  // 全量重建（从 sidecar），当前为同步接口
+GET  /gos3/admin/catalog/status   → {"docs":1234567,"appliedSeq":88,"gen":3,"dropped":0,"queued":0,"capacity":65536,"state":"ready"}
 ```
 
 分页用 continuation token（base64 的主键 + seq），保证 **快照隔离**：token 里带 gen，
@@ -176,6 +176,21 @@ Filter(谓词集合)
 `WHERE` 只允许 `AND` 连接的比较 / `LIKE`（前缀）/ `IN`。
 **不写 SQL 引擎**：解析器直接产出上面的 `Filter`，SQL 只是查询 DSL 的语法糖。
 这也正是 `mc sql` 对用户的心智模型。
+
+### 5.4 实现状态（C4）
+
+已落地 `internal/catalog/query.go` 与 `internal/api/admin_catalog.go`：
+
+- `GET /gos3/admin/catalog/search`：`bucket`、`prefix`、`contentType`、`minSize`、`maxSize`、
+  `after`、`before`（RFC3339 或 Unix 秒）、`meta.<key>`、`tag.<key>`、`limit`（默认 100，最大 1000）、
+  `token`、`versions=true`、`deleteMarkers=true`。
+- `GET /gos3/admin/catalog/stats`：`groupBy=bucket|contentType|sizeBucket`（`storageClass` 无数据源，未支持）。
+- `GET /gos3/admin/catalog/status`：`docs` / `appliedSeq` / `gen` / `dropped` / `queued` / `capacity` / `state`。
+- `POST /gos3/admin/catalog/reindex`：从 sidecar 全量重建（同步执行）；重建会递增 `gen`，旧分页 token 返回 409。
+- 分页 token = base64(gen + 查询指纹 + 主键)，查询条件或 `gen` 变化都会拒绝旧 token。
+- 响应头 `X-Gos3-Catalog-Scan` 取值为 `index` / `bucket` / `full`，分别表示二级索引、bucket 主键扫描、全量扫描。
+
+`/gos3/admin/catalog/sql` 尚未实现（C5）。
 
 ---
 
@@ -205,6 +220,10 @@ Filter(谓词集合)
 - 新节点加入 → 后台 full rebuild，期间该节点查询返回 `503 + Retry-After`（或转发到已就绪节点，二选一）。
 - 若未来 meta 改成分片存储，索引随之改为 **按 bucket hash 分片 + 查询 fan-out + 归并**，
   `Index` 接口与查询层不用动。
+
+> **实现状态（C4 后）**：上述集群形态尚未落地。当前每个节点的 catalog 只索引
+> 本节点 API 写入的事件，跨节点写入不会自动进入其他节点的索引；也没有新节点
+> 自动 full rebuild / 查询 503 的逻辑。这些属于 C6。
 
 ---
 
@@ -246,10 +265,10 @@ CLI 开关（`internal/config`）：
 
 ## 9. 里程碑（M8 · Catalog）
 
-- [ ] **C1** `Doc`/`Index` 接口 + 内存实现 + 单测（主键、二级索引、删除标记、版本）
-- [ ] **C2** WAL + snapshot + 恢复 + 全量重建（kill -9 后状态一致）
-- [ ] **C3** `Indexed` 装饰器接入 + 异步 worker + 队列满降级
-- [ ] **C4** `search` / `stats` / `status` API + console UI 的筛选侧栏
+- [x] **C1** `Doc`/`Index` 接口 + 内存实现 + 单测（主键、二级索引、删除标记、版本）
+- [x] **C2** WAL + snapshot + 恢复 + 全量重建（kill -9 后状态一致）
+- [x] **C3** `Indexed` 装饰器接入 + 异步 worker + 队列满降级
+- [x] **C4** `search` / `stats` / `status` / `reindex` API（console UI 的筛选侧栏待补）
 - [ ] **C5** `SELECT` 子集解析 + 计划选择
 - [ ] **C6** reconcile / 多节点一致性 / 新节点 rebuild
 - [ ] **C7**（可选）用索引替换 `ListObjects` 的 `walkMetas` 全目录遍历

@@ -498,6 +498,10 @@ CatalogMetaWhitelist []string    // UserMeta 白名单；空 = 只索引系统�
 CatalogTagWhitelist  []string    // Tags 白名单（Tags 暂无数据源，v1 恒空）
 ~~~
 
+> 实现状态：目前只接线了 `Catalog`、`CatalogDir`、`CatalogMetaWhitelist`、`CatalogTagWhitelist`；
+> 其余参数使用代码内默认值（SyncEvery=256 / SyncTimeout=20ms / SegBytes=64MiB / SegDocs=10 万 /
+> SnapDocs=100 万），尚未暴露为 CLI flag。
+
 ---
 
 ## 13. 对接点（核对代码后的精确清单）
@@ -517,14 +521,14 @@ CatalogTagWhitelist  []string    // Tags 白名单（Tags 暂无数据源，v1 �
 
 对应总体设计 9 节的 C1/C2，拆得更细：
 
-- [ ] E1 omap skip list：Get/Upsert/Delete/Seek + 边界单测（含并发读）
-- [ ] E2 codec：Doc/WAL/快照编码解码 roundtrip + crc 损坏检测
-- [ ] E3 memoryIndex.apply：Put/Del/clearLatest/二级索引增删 + 乱序重放幂等
-- [ ] E4 wal：Append/组提交/Seal/截断 + 崩溃恢复（kill -9 后状态一致）
-- [ ] E5 snapshot：快照写读 + 原子切换协议 + 切换中途崩溃恢复
-- [ ] E6 engine.Recover 全链路：干净启动 / 丢尾 / gap / 坏 crc -> 全量重建
-- [ ] E7 Indexed 装饰器接入 + sequencer/applier 编排 + 队列满降级
-- [ ] E8 基准：100 万 doc 的写入吞吐、恢复时间、内存占用，对照 4.3 估算
+- [x] E1 omap skip list：Get/Upsert/Delete/Seek + 边界单测（含并发读）
+- [x] E2 codec：Doc/WAL/快照编码解码 roundtrip + crc 损坏检测
+- [x] E3 memoryIndex.apply：Put/Del/clearLatest/二级索引增删 + 乱序重放幂等
+- [x] E4 wal：Append/组提交/Seal/截断 + 崩溃恢复（kill -9 后状态一致）
+- [x] E5 snapshot：快照写读 + 原子切换协议 + 切换中途崩溃恢复
+- [x] E6 engine.Recover 全链路：干净启动 / 丢尾 / gap / 坏 crc -> 全量重建
+- [x] E7 Indexed 装饰器接入 + sequencer/applier 编排 + 队列满降级
+- [ ] E8 基准：100 万 doc 的写入吞吐、恢复时间、内存占用，对照 4.3 估算（已有 3 个 microbenchmark，未做百万级验证）
 
 崩溃一致性测试方法：写一个 test helper，在 N 次 PUT 的随机时刻 os.Exit，重启后 Recover，
 断言索引与 sidecar（walkMetas）逐 key 一致。这是验证 WAL+快照+幂等三段协同的唯一可信手段。

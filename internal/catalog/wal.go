@@ -159,6 +159,9 @@ func (w *Wal) Append(seq uint64, ev Event) error {
 	return nil
 }
 
+// Pending 返回尚未 fsync 的记录数（调用方需自行保证与写路径互斥）。
+func (w *Wal) Pending() int { return w.pending }
+
 // Sync 把缓冲 flush 到文件并 fsync。
 func (w *Wal) Sync() error {
 	if w.w == nil {

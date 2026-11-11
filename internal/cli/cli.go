@@ -52,6 +52,10 @@ SERVER FLAGS:
   -grpc-address    internode gRPC listen address (default ":9001")
   -advertise       gRPC address other nodes use to reach this node
   -peers           comma-separated peer gRPC addresses (distributed mode)
+  -catalog         enable metadata catalog/index
+  -catalog-dir     catalog index directory (default <data-dir>/.catalog)
+  -catalog-meta-whitelist  comma-separated user-meta keys to index
+  -catalog-tag-whitelist   comma-separated tag keys to index
 `
 
 func Main(args []string) int {
@@ -93,6 +97,9 @@ func runServer(args []string) int {
 	fs.DurationVar(&cfg.ScanInterval, "scan-interval", cfg.ScanInterval, "lifecycle scan interval")
 	fs.BoolVar(&cfg.Catalog, "catalog", cfg.Catalog, "enable metadata catalog (index)")
 	fs.StringVar(&cfg.CatalogDir, "catalog-dir", "", "catalog index directory (default <data-dir>/.catalog)")
+	// 白名单决定哪些 user-meta / tag 会进二级索引；不配则只索引系统字段。
+	metaWhitelistFlag := fs.String("catalog-meta-whitelist", "", "comma-separated user-meta keys to index (lowercase, without x-amz-meta- prefix)")
+	tagWhitelistFlag := fs.String("catalog-tag-whitelist", "", "comma-separated tag keys to index")
 	// peers 采用逗号分隔字符串，稍后再拆分为切片
 	peersFlag := fs.String("peers", "", "comma-separated peer gRPC addresses")
 	if err := fs.Parse(args); err != nil {
@@ -108,6 +115,8 @@ func runServer(args []string) int {
 	cfg.DataDirs = fs.Args()
 	cfg.DataDir = cfg.DataDirs[0]
 	cfg.Peers = splitPeers(*peersFlag)
+	cfg.CatalogMetaWhitelist = splitPeers(*metaWhitelistFlag)
+	cfg.CatalogTagWhitelist = splitPeers(*tagWhitelistFlag)
 	// IAM 凭据目录默认放在主数据目录下的 .iam
 	if cfg.IAMDir == "" {
 		cfg.IAMDir = filepath.Join(cfg.DataDir, ".iam")
@@ -163,7 +172,7 @@ func runServer(args []string) int {
 		indexed, err := catalog.New(st, catalog.Config{
 			Dir:      catDir,
 			Wal:      catalog.WalConfig{Dir: catDir},
-			Index:    catalog.IndexConfig{},
+			Index:    catalog.IndexConfig{MetaWhitelist: whitelistSet(cfg.CatalogMetaWhitelist, true), TagWhitelist: whitelistSet(cfg.CatalogTagWhitelist, false)},
 			SnapDocs: 1_000_000,
 		}, logger)
 		if err != nil {
@@ -439,6 +448,27 @@ func splitPeers(s string) []string {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
+	}
+	return out
+}
+
+// whitelistSet 把逗号分隔的 key 列表转成集合；user-meta key 按 S3 语义统一小写。
+func whitelistSet(keys []string, lower bool) map[string]struct{} {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if lower {
+			k = strings.ToLower(k)
+		}
+		if k != "" {
+			out[k] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

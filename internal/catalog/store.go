@@ -94,6 +94,34 @@ func (s *Indexed) Engine() *Engine { return s.eng }
 // Dropped 返回因队列满被丢弃的事件数。
 func (s *Indexed) Dropped() uint64 { return s.dropped.Load() }
 
+// Status 返回引擎 + 队列的运行状态，供 /gos3/admin/catalog/status 使用。
+func (s *Indexed) Status() Status {
+	st := s.eng.Status()
+	st.Dropped = s.dropped.Load()
+	st.Queued = len(s.q)
+	st.Capacity = cap(s.q)
+	if st.Dropped > 0 || (st.Capacity > 0 && st.Queued >= st.Capacity) {
+		st.State = "lagging"
+	}
+	return st
+}
+
+// Rebuild 触发一次全量重建（管理端 reindex）。重建以 sidecar 为真相，
+// 成功后可清空累计 dropped 计数，让 status 从 lagging 回到 ready。
+func (s *Indexed) Rebuild() error {
+	if err := s.eng.Rebuild(); err != nil {
+		return err
+	}
+	s.dropped.Store(0)
+	return nil
+}
+
+// Search 查询索引。
+func (s *Indexed) Search(f Filter) (SearchResult, error) { return s.eng.Search(f) }
+
+// Stats 聚合查询索引。
+func (s *Indexed) Stats(opts StatsOptions) (StatsResult, error) { return s.eng.Stats(opts) }
+
 // ---- 覆盖写路径 ----
 
 func (s *Indexed) PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (store.ObjectInfo, error) {
@@ -107,24 +135,40 @@ func (s *Indexed) PutObject(ctx context.Context, bucket, object string, data io.
 func (s *Indexed) DeleteObject(ctx context.Context, bucket, object, versionID string) (store.DeleteResult, error) {
 	res, err := s.Store.DeleteObject(ctx, bucket, object, versionID)
 	if err == nil {
-		if res.DeleteMarker {
-			s.enqueue(Event{Op: OpPut, Doc: Doc{Bucket: bucket, Key: object, VersionID: res.VersionID, DeleteMarker: true, IsLatest: true, ModTime: time.Now().UTC()}})
-		} else {
-			s.enqueue(Event{Op: OpDel, Doc: Doc{Bucket: bucket, Key: object, VersionID: res.VersionID}})
-		}
+		s.indexDelete(bucket, object, res)
 	}
 	return res, err
 }
 
+// DeleteObjects 逐个调用底层 DeleteObject 以拿到真实的删除结果。
+// 不能复用请求里的 VersionID：非版本化删除的主键是 "null"、版本化删除会生成
+// 删除标记，直接按请求参数入队会写错主键或丢掉删除标记。
 func (s *Indexed) DeleteObjects(ctx context.Context, bucket string, objects []store.ObjectToDelete) []error {
-	errs := s.Store.DeleteObjects(ctx, bucket, objects)
-	for i, err := range errs {
-		if err == nil {
-			// 简化：批量删除不区分删除标记，统一按硬删处理；删除标记场景由 reconcile/重建修正。
-			s.enqueue(Event{Op: OpDel, Doc: Doc{Bucket: bucket, Key: objects[i].Object, VersionID: objects[i].VersionID}})
+	errs := make([]error, len(objects))
+	for i, obj := range objects {
+		res, err := s.Store.DeleteObject(ctx, bucket, obj.Object, obj.VersionID)
+		if err != nil {
+			errs[i] = err
+			continue
 		}
+		s.indexDelete(bucket, obj.Object, res)
 	}
 	return errs
+}
+
+// indexDelete 按底层删除的真实结果投递事件。
+func (s *Indexed) indexDelete(bucket, object string, res store.DeleteResult) {
+	if res.VersionID == "" {
+		res.VersionID = store.NullVersionID
+	}
+	if res.DeleteMarker {
+		s.enqueue(Event{Op: OpPut, Doc: Doc{
+			Bucket: bucket, Key: object, VersionID: res.VersionID,
+			DeleteMarker: true, IsLatest: true, ModTime: time.Now().UTC(),
+		}})
+		return
+	}
+	s.enqueue(Event{Op: OpDel, Doc: Doc{Bucket: bucket, Key: object, VersionID: res.VersionID}})
 }
 
 func (s *Indexed) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []store.CompletePart) (store.ObjectInfo, error) {
@@ -152,6 +196,10 @@ func docFromObjectInfo(info store.ObjectInfo, latest bool) Doc {
 }
 
 // rebuildFromStore 从底层 store 的 sidecar 元数据全量重建（作为引擎的 rebuild 源）。
+//
+// WalkVersions 对每个 key 是「最新版本在前」，而引擎按 emit 顺序递增分配 Seq。
+// 为了让「最后写入的版本 Seq 最大」，这里按 key 缓冲后倒序 emit（旧版本先出），
+// 否则重建后删除最新版本时 promoteLatest 会选错下一个版本。
 func rebuildFromStore(ctx context.Context, st store.Store) RebuildFunc {
 	return func(emit func(Event) error) error {
 		buckets, err := st.ListBuckets(ctx)
@@ -159,16 +207,32 @@ func rebuildFromStore(ctx context.Context, st store.Store) RebuildFunc {
 			return err
 		}
 		for _, b := range buckets {
-			err := st.WalkVersions(ctx, b.Name, func(v store.VersionInfo) error {
-				d := Doc{
-					Bucket: b.Name, Key: v.Name, VersionID: v.VersionID,
-					IsLatest: v.IsLatest, DeleteMarker: v.DeleteMarker,
-					Size: v.Size, ETag: v.ETag, ContentType: v.ContentType,
-					UserMeta: v.UserMetadata, ModTime: v.ModTime,
+			var pending []Doc
+			curKey := ""
+			flush := func() error {
+				for i := len(pending) - 1; i >= 0; i-- {
+					if err := emit(Event{Op: OpPut, Doc: pending[i]}); err != nil {
+						return err
+					}
 				}
-				return emit(Event{Op: OpPut, Doc: d})
+				pending = nil
+				return nil
+			}
+
+			err := st.WalkVersions(ctx, b.Name, func(v store.VersionInfo) error {
+				if v.Name != curKey {
+					if err := flush(); err != nil {
+						return err
+					}
+					curKey = v.Name
+				}
+				pending = append(pending, docFromObjectInfo(v.ObjectInfo, v.IsLatest))
+				return nil
 			})
 			if err != nil {
+				return err
+			}
+			if err := flush(); err != nil {
 				return err
 			}
 		}

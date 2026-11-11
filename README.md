@@ -13,7 +13,7 @@
 - **多种存储后端**：
   - 单目录文件系统（`store.FS`）
   - Reed-Solomon 纠删码（`store.Erasure`，容忍盘 / 节点丢失）
-- **元数据检索（Catalog）**：对标 MinIO AIStor 的 Metadata Search，为对象元数据建立主键 + 二级索引，支持按 contentType / 大小 / 修改时间 / tag / user-meta 检索；WAL + 快照持久化，可全量重建
+- **元数据检索（Catalog）**：对标 MinIO AIStor 的 Metadata Search，为对象元数据建立主键 + 二级索引，支持按 contentType / 大小 / 修改时间 / tag / user-meta 检索；WAL + 快照持久化，可全量重建；管理端提供 `search` / `stats` / `status` / `reindex` API
 - **分布式集群**：节点间 gRPC 通信，对等发现，全局磁盘装配
 - **IAM 鉴权**：用户 / 策略管理、跨节点复制、内置 Web 控制台
 - **可观测性**：OpenTelemetry 链路追踪（HTTP / gRPC / 存储三层 span），日志携带 `trace_id` / `span_id`
@@ -98,6 +98,8 @@ gos3 help
 | `-scan-interval` | `1m` | 生命周期扫描间隔 |
 | `-catalog` | `false` | 启用元数据索引 |
 | `-catalog-dir` | `<data-dir>/.catalog` | 索引目录 |
+| `-catalog-meta-whitelist` | — | 逗号分隔的 user-meta key（小写、不含 `x-amz-meta-` 前缀） |
+| `-catalog-tag-whitelist` | — | 逗号分隔的 tag key |
 
 端口约定：S3 服务 `9000`，节点间 gRPC `9001`。
 
@@ -156,6 +158,10 @@ GET|PUT|DELETE /gos3/admin/policies     策略管理
 PUT  /gos3/admin/attach                 绑定策略
 PUT  /gos3/admin/detach                 解绑策略
 GET  /gos3/admin/presign                预签名下载 URL
+GET  /gos3/admin/catalog/search         元数据检索（仅 root）
+GET  /gos3/admin/catalog/stats          元数据聚合（仅 root）
+GET  /gos3/admin/catalog/status         索引状态（仅 root）
+POST /gos3/admin/catalog/reindex        全量重建索引（仅 root）
      /gos3/admin/buckets...             桶 / 对象管理（按策略授权）
 ```
 
@@ -172,15 +178,46 @@ GET  /gos3/admin/presign                预签名下载 URL
 
 可选开启（`-catalog`），对标 MinIO AIStor 的 **Catalog / Metadata Search**：以 sidecar 元数据为唯一真相，旁挂建立索引，按对象属性检索，替代逐目录遍历。
 
+启动示例（user-meta 白名单决定哪些自定义元数据进二级索引）：
+
+```bash
+./gos3 server -catalog -catalog-meta-whitelist owner,project /tmp/gos3-data
+```
+
 **已实现**
 
 - 主键 + 5 个二级索引：`contentType`、修改时间、大小分档、`tag`（多值）、`user-meta`（白名单 key）
-- WAL + 快照 + MANIFEST 持久化，崩溃（kill -9）后恢复一致，支持全量重建
-- 写路径异步投递（write-behind），队列满自动降级计数
+  - `tag` 索引已就绪，但当前尚未实现 S3 Object Tagging，运行时没有 tag 数据源
+  - `user-meta` 必须通过 `-catalog-meta-whitelist` 显式开启，否则只索引系统字段
+- WAL + 快照 + MANIFEST 持久化，崩溃（kill -9）后恢复已 fsync 的记录，支持全量重建
+- 写路径异步投递（write-behind），队列满自动降级计数；后台定时 fsync 兜底低写入速率
+- 查询 API：`search`（过滤 + 分页）、`stats`（聚合）、`status`、`reindex`
+
+**查询示例**
+
+```bash
+BASE=http://127.0.0.1:9000/gos3/admin/catalog
+AUTH=minioadmin:minioadmin
+
+# 按 bucket / 前缀 / 类型 / 大小检索；默认只返回最新版本、不含删除标记
+curl -u "$AUTH" "$BASE/search?bucket=photos&prefix=2026/&contentType=image/jpeg&minSize=1048576&limit=50"
+
+# user-meta / tag 等值过滤
+curl -u "$AUTH" "$BASE/search?bucket=photos&meta.owner=alice&tag.env=prod"
+
+# 按 contentType 聚合
+curl -u "$AUTH" "$BASE/stats?bucket=photos&groupBy=contentType"
+
+# 索引状态 / 从 sidecar 全量重建
+curl -u "$AUTH" "$BASE/status"
+curl -u "$AUTH" -X POST "$BASE/reindex"
+```
+
+分页：把响应中的 `nextToken` 原样作为 `token` 参数传回。索引重建会改变 `gen`，旧 token 返回 `409`，需要重新发起查询。搜索响应头 `X-Gos3-Catalog-Scan` 表示扫描方式：`index`（命中二级索引）、`bucket`（bucket 内主键扫描）或 `full`（全量扫描）。`versions=true` 可包含历史版本，`deleteMarkers=true` 可包含删除标记。
 
 **规划中**（见 [docs/metadata-catalog.md](docs/metadata-catalog.md)）
 
-- `/gos3/admin/catalog/search|stats|sql` 查询 API
+- SQL 子集（`SELECT`）
 - 多节点 reconcile 与一致性
 
 ## 项目结构
@@ -245,5 +282,8 @@ make verify-dist     # 分布式端到端验证（2 节点，含节点宕机重�
 - 分片上传暂存仅落在第一个全局盘
 - `ListObjectVersions` 不支持 `version-id-marker`
 - 仅支持 path-style 寻址，无 virtual-host 风格
+- Catalog 索引是节点本地内存态，未做跨节点事件复制 / reconcile；分布式模式下查询只反映本节点写入及启动时从 sidecar 重建的结果
+- Catalog 未实现 `CatalogMaxDocs` / 换用磁盘 KV，文档数达到千万级时内存会吃紧
+- 尚未实现 S3 Object Tagging，`tag` 二级索引当前没有数据源
 
 更多细节见 [docs/architecture-summary.md](docs/architecture-summary.md) 的"已知限制"一节。

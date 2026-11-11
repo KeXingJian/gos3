@@ -34,6 +34,8 @@ type adminSession struct {
 //   - PUT            /gos3/admin/attach       给用户绑定策略（仅 root）
 //   - PUT            /gos3/admin/detach       解绑策略（仅 root）
 //   - GET            /gos3/admin/presign      生成预签名下载 URL（需 s3:GetObject）
+//   - GET            /gos3/admin/catalog/search|stats|status  元数据检索（仅 root）
+//   - POST           /gos3/admin/catalog/reindex               全量重建索引（仅 root）
 //   - /gos3/admin/buckets...                  管理端 bucket/object 操作（按策略授权）
 //
 // 命中该前缀即返回 true（表示已处理）。
@@ -80,6 +82,12 @@ func (h *Handler) ServeAdmin(w http.ResponseWriter, r *http.Request) bool {
 		h.adminDetach(w, r)
 	case p == "/gos3/admin/presign":
 		h.adminPresign(w, r, sess)
+	case strings.HasPrefix(p, "/gos3/admin/catalog/"):
+		if !sess.Root {
+			writeAdminForbidden(w)
+			return true
+		}
+		h.adminCatalog(w, r)
 	case strings.HasPrefix(p, "/gos3/admin/buckets"):
 		rest := strings.TrimPrefix(p, "/gos3/admin/buckets")
 		// 只放行能明确映射到 S3 action 的路由：未识别路径直接 404，

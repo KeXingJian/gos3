@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
 
 // Config 是 Catalog 引擎的配置。
@@ -16,11 +18,15 @@ type Config struct {
 	SnapDocs int         // 累计 WAL 记录数达到则触发快照（<=0 不自动快照）
 }
 
-// Status 是引擎的运行状态摘要。
+// Status 是引擎/装饰器的运行状态摘要。
 type Status struct {
-	Docs       int
-	AppliedSeq uint64
-	Gen        uint64
+	Docs       int    `json:"docs"`
+	AppliedSeq uint64 `json:"appliedSeq"`
+	Gen        uint64 `json:"gen"`
+	Dropped    uint64 `json:"dropped"`
+	Queued     int    `json:"queued"`
+	Capacity   int    `json:"capacity"`
+	State      string `json:"state"`
 }
 
 // RebuildFunc 是全量重建的数据源：从 sidecar 元数据逐个 emit 事件。
@@ -37,6 +43,14 @@ type Engine struct {
 	seq     uint64 // 下一个要分配的 seq（= 已 apply 的最大 seq）
 	rebuild RebuildFunc
 	walDocs int // 自上次快照以来的 WAL 记录数
+
+	// mu 保护 ix/gen/seq/wal：写路径（Append/Rebuild）拿写锁，查询/Status 拿读锁。
+	mu sync.RWMutex
+	// syncLoop 负责把「低写入速率下未达到 SyncEvery 的尾部记录」按 SyncTimeout
+	// 主动 fsync，避免它们无限期留在缓冲区里。
+	stopSync  chan struct{}
+	syncDone  chan struct{}
+	syncEvery time.Duration
 }
 
 // NewEngine 创建或恢复引擎。rebuild 提供全量重建数据源（可能为 nil，
@@ -48,11 +62,40 @@ func NewEngine(cfg Config, rebuild RebuildFunc) (*Engine, error) {
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
 		return nil, err
 	}
-	e := &Engine{dir: cfg.Dir, cfg: cfg, gen: cfg.Gen, rebuild: rebuild}
+	e := &Engine{
+		dir:       cfg.Dir,
+		cfg:       cfg,
+		gen:       cfg.Gen,
+		rebuild:   rebuild,
+		syncEvery: cfg.Wal.withDefaults().SyncTimeout,
+		stopSync:  make(chan struct{}),
+		syncDone:  make(chan struct{}),
+	}
 	if err := e.recover(); err != nil {
 		return nil, err
 	}
+	go e.syncLoop()
 	return e, nil
+}
+
+// syncLoop 周期性把 WAL 缓冲刷到磁盘。Append 只在写请求发生时检查超时，
+// 若写入流突然停止，尾部记录会一直留在 bufio 缓冲里；这里补上定时兜底。
+func (e *Engine) syncLoop() {
+	defer close(e.syncDone)
+	t := time.NewTicker(e.syncEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			e.mu.Lock()
+			if e.wal != nil && e.wal.Pending() > 0 {
+				_ = e.wal.Sync()
+			}
+			e.mu.Unlock()
+		case <-e.stopSync:
+			return
+		}
+	}
 }
 
 // recover 启动恢复：manifest -> 快照 -> WAL 重放。任何不一致走全量重建。
@@ -179,6 +222,12 @@ func (e *Engine) fullRebuild() error {
 
 // Append 分配 seq、写 WAL、更新索引（同步）。
 func (e *Engine) Append(ev Event) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.appendLocked(ev)
+}
+
+func (e *Engine) appendLocked(ev Event) error {
 	e.seq++
 	ev.Doc.Seq = e.seq
 	if err := e.wal.Append(e.seq, ev); err != nil {
@@ -187,13 +236,19 @@ func (e *Engine) Append(ev Event) error {
 	e.ix.apply(ev)
 	e.walDocs++
 	if e.cfg.SnapDocs > 0 && e.walDocs >= e.cfg.SnapDocs {
-		return e.Snapshot()
+		return e.snapshotLocked()
 	}
 	return nil
 }
 
 // Snapshot 把当前索引落快照、截断 WAL、更新 manifest。
 func (e *Engine) Snapshot() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.snapshotLocked()
+}
+
+func (e *Engine) snapshotLocked() error {
 	// 先封口当前段，让所有已写记录进入 sealed，才能被截断回收
 	if err := e.wal.Seal(); err != nil {
 		return err
@@ -218,17 +273,46 @@ func (e *Engine) Snapshot() error {
 	return nil
 }
 
-// Close 封口 WAL。
+// Close 停止定时 fsync，封口 WAL。
 func (e *Engine) Close() error {
+	close(e.stopSync)
+	<-e.syncDone
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	return e.wal.Close()
 }
 
-// View 返回内存索引（只读使用，调用方不得并发修改）。
+// Rebuild 以 sidecar 为唯一真相重建全量索引（管理端 reindex 使用）。
+// 重建期间持有写锁，写事件会在队列里排队；重建完成后新 gen 生效，旧分页 token 失效。
+func (e *Engine) Rebuild() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.fullRebuild()
+}
+
+// View 返回内存索引。仅供同包测试/诊断使用：返回后引擎仍可能并发写，
+// 调用方不能在无锁状态下访问；线上查询请走 Search/Stats。
 func (e *Engine) View() *memoryIndex { return e.ix }
 
 // Status 返回运行状态摘要。
 func (e *Engine) Status() Status {
-	return Status{Docs: e.ix.Len(), AppliedSeq: e.ix.appliedSeq, Gen: e.gen}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return Status{Docs: e.ix.Len(), AppliedSeq: e.ix.appliedSeq, Gen: e.gen, State: "ready"}
+}
+
+// Search 在只读锁内执行一次元数据查询。
+func (e *Engine) Search(f Filter) (SearchResult, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.ix.search(f, e.gen)
+}
+
+// Stats 在只读锁内执行一次聚合查询。
+func (e *Engine) Stats(opts StatsOptions) (StatsResult, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.ix.stats(opts, e.gen)
 }
 
 // removeSegmentFiles 删除指定 gen 的全部 WAL 段文件。

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kxj/gos3/internal/catalog"
 	"github.com/kxj/gos3/internal/health"
 	"github.com/kxj/gos3/internal/iam"
 	"github.com/kxj/gos3/internal/lifecycle"
@@ -36,8 +37,18 @@ type IAMReplicator interface {
 	Replicate(ctx context.Context)
 }
 
+// CatalogService 是元数据检索服务（实现见 internal/catalog.Indexed）。
+// 为 nil 时表示未启用 -catalog，相关管理接口返回 503。
+type CatalogService interface {
+	Search(catalog.Filter) (catalog.SearchResult, error)
+	Stats(catalog.StatsOptions) (catalog.StatsResult, error)
+	Status() catalog.Status
+	Rebuild() error
+}
+
 type Handler struct {
 	Store         store.Store
+	Catalog       CatalogService
 	IAM           *iam.Store
 	IAMReplicator IAMReplicator
 	ClusterHealth HealthReporter

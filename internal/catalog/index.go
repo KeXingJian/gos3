@@ -79,7 +79,30 @@ func (ix *memoryIndex) apply(ev Event) {
 	case OpDel:
 		if old, existed := ix.primary.Delete(pk); existed {
 			ix.removeSecondary(old)
+			// 删除的是最新版本时，sidecar 会把下一个版本顶成最新；
+			// 索引必须同步提升，否则查询层的 IsLatest 过滤会漏对象。
+			if old.IsLatest {
+				ix.promoteLatest(d.Bucket, d.Key)
+			}
 		}
+	}
+}
+
+// promoteLatest 把同一 key 下事件序号最大（最后写入）的存活版本标记为最新。
+// 删除标记也参与提升：删掉最新删除标记后，前一个删除标记仍应代表「对象已删」。
+func (ix *memoryIndex) promoteLatest(bucket, key string) {
+	prefix := encodeKeys(bucket, key)
+	var latest *Doc
+	it := ix.primary.Seek(prefix)
+	for it.Valid() && bytes.HasPrefix(it.Key(), prefix) {
+		d := it.Doc()
+		if latest == nil || d.Seq > latest.Seq {
+			latest = d
+		}
+		it.Next()
+	}
+	if latest != nil {
+		latest.IsLatest = true
 	}
 }
 

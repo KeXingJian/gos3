@@ -19,17 +19,23 @@ type Server struct {
 }
 
 func New(cfg config.Config, st store.Store, iamStore *iam.Store, logger *slog.Logger, healthReporter api.HealthReporter) *Server {
+	h := &api.Handler{
+		Store:         st,
+		IAM:           iamStore,
+		ClusterHealth: healthReporter,
+		Region:        cfg.Region,
+		OwnerID:       cfg.OwnerID,
+		RootUser:      cfg.RootUser,
+		RootPass:      cfg.RootPass,
+		Logger:        logger,
+	}
+	// -catalog 启用时，cli 传入的 store 已被 catalog.Indexed 包装；
+	// 管理端据此拿到只读查询能力。未启用时 Catalog 保持 nil。
+	if c, ok := st.(api.CatalogService); ok {
+		h.Catalog = c
+	}
 	s := &Server{
-		api: &api.Handler{
-			Store:         st,
-			IAM:           iamStore,
-			ClusterHealth: healthReporter,
-			Region:        cfg.Region,
-			OwnerID:       cfg.OwnerID,
-			RootUser:      cfg.RootUser,
-			RootPass:      cfg.RootPass,
-			Logger:        logger,
-		},
+		api:    h,
 		iam:    iamStore,
 		logger: logger,
 	}

@@ -120,6 +120,47 @@ func TestClearLatestOnNewVersion(t *testing.T) {
 	}
 }
 
+// TestDeleteLatestPromotesPrevious 删除最新版本后，索引应把上一个版本顶成最新。
+func TestDeleteLatestPromotesPrevious(t *testing.T) {
+	ix := newMemoryIndex(IndexConfig{})
+	ix.apply(Event{Op: OpPut, Doc: mkDoc("b", "k", "v1", 1)})
+	ix.apply(Event{Op: OpPut, Doc: mkDoc("b", "k", "v2", 2)})
+	ix.apply(Event{Op: OpDel, Doc: Doc{Bucket: "b", Key: "k", VersionID: "v2", Seq: 3}})
+
+	v1, ok := ix.primary.Get(primaryKey("b", "k", "v1"))
+	if !ok {
+		t.Fatal("v1 should remain")
+	}
+	if !v1.IsLatest {
+		t.Fatal("v1 should become latest after deleting v2")
+	}
+	if _, ok := ix.primary.Get(primaryKey("b", "k", "v2")); ok {
+		t.Fatal("v2 should be deleted")
+	}
+}
+
+// TestDeleteLatestMarkerPromotesPreviousMarker 删除最新删除标记后，
+// 前一个删除标记应重新成为最新（对象仍然处于已删除状态）。
+func TestDeleteLatestMarkerPromotesPreviousMarker(t *testing.T) {
+	ix := newMemoryIndex(IndexConfig{})
+	ix.apply(Event{Op: OpPut, Doc: mkDoc("b", "k", "v1", 1)})
+	m1 := mkDoc("b", "k", "dm1", 2)
+	m1.DeleteMarker = true
+	ix.apply(Event{Op: OpPut, Doc: m1})
+	m2 := mkDoc("b", "k", "dm2", 3)
+	m2.DeleteMarker = true
+	ix.apply(Event{Op: OpPut, Doc: m2})
+	ix.apply(Event{Op: OpDel, Doc: Doc{Bucket: "b", Key: "k", VersionID: "dm2", Seq: 4}})
+
+	dm1, ok := ix.primary.Get(primaryKey("b", "k", "dm1"))
+	if !ok {
+		t.Fatal("dm1 should remain")
+	}
+	if !dm1.IsLatest {
+		t.Fatal("dm1 should become latest")
+	}
+}
+
 func TestDeleteMarkerClearsLatest(t *testing.T) {
 	ix := newMemoryIndex(IndexConfig{})
 	ix.apply(Event{Op: OpPut, Doc: mkDoc("b", "k", "v1", 1)})

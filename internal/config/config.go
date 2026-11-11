@@ -35,6 +35,10 @@ type Config struct {
 	Catalog bool
 	// CatalogDir 索引目录（默认 <主数据目录>/.catalog）
 	CatalogDir string
+	// CatalogMetaWhitelist 允许建二级索引的 user-meta key（小写、不含 x-amz-meta- 前缀）
+	CatalogMetaWhitelist []string
+	// CatalogTagWhitelist 允许建二级索引的 tag key
+	CatalogTagWhitelist []string
 }
 
 func Default() Config {
