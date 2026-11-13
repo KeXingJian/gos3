@@ -54,6 +54,7 @@ func Default() Config {
 		MaxSkew:           15 * time.Minute,
 		ReadHeaderTimeout: 10 * time.Second,
 		ShutdownTimeout:   10 * time.Second,
+		Catalog:           true,
 	}
 }
 
