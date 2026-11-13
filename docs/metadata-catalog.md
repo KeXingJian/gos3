@@ -190,7 +190,7 @@ Filter(谓词集合)
 - 分页 token = base64(gen + 查询指纹 + 主键)，查询条件或 `gen` 变化都会拒绝旧 token。
 - 响应头 `X-Gos3-Catalog-Scan` 取值为 `index` / `bucket` / `full`，分别表示二级索引、bucket 主键扫描、全量扫描。
 
-`/gos3/admin/catalog/sql` 尚未实现（C5）。
+`POST /gos3/admin/catalog/sql` 已支持受限查询：`SELECT <columns|*|count(*)> FROM S3Object [WHERE ...] [LIMIT n]`，过滤支持 AND、比较、前缀 LIKE 与单字段 IN。它是 metadata-only DSL，不执行任意 SQL、不读对象内容。
 
 ---
 
@@ -221,9 +221,7 @@ Filter(谓词集合)
 - 若未来 meta 改成分片存储，索引随之改为 **按 bucket hash 分片 + 查询 fan-out + 归并**，
   `Index` 接口与查询层不用动。
 
-> **实现状态（C4 后）**：上述集群形态尚未落地。当前每个节点的 catalog 只索引
-> 本节点 API 写入的事件，跨节点写入不会自动进入其他节点的索引；也没有新节点
-> 自动 full rebuild / 查询 503 的逻辑。这些属于 C6。
+> **实现状态（C6）**：每节点保留本地索引目录，从共享 sidecar 首次启动全量 rebuild，并默认每 5 分钟全量 reconcile，修补跨节点漏记及队列丢事件；通过 `-catalog-reconcile` 调整间隔。该方案是最终一致而非实时复制，rebuild 会改变 gen 并使旧分页 token 失效；没有共享写 .catalog，也没有事件传输。
 
 ---
 
@@ -268,9 +266,10 @@ CLI 开关（`internal/config`）：
 - [x] **C1** `Doc`/`Index` 接口 + 内存实现 + 单测（主键、二级索引、删除标记、版本）
 - [x] **C2** WAL + snapshot + 恢复 + 全量重建（kill -9 后状态一致）
 - [x] **C3** `Indexed` 装饰器接入 + 异步 worker + 队列满降级
-- [x] **C4** `search` / `stats` / `status` / `reindex` API（console UI 的筛选侧栏待补）
-- [ ] **C5** `SELECT` 子集解析 + 计划选择
-- [ ] **C6** reconcile / 多节点一致性 / 新节点 rebuild
+- [x] **C4** `search` / `stats` / `status` / `reindex` API + console UI 筛选页
+- [x] **C5** `SELECT` 子集解析与 API（受限 AND/比较/前缀 LIKE/IN）
+- [x] **C6** 新节点启动重建 + 定时 sidecar reconcile（最终一致，不含实时复制）
+- [x] S3 Object Tagging per-version sidecar 与 catalog ingest
 - [ ] **C7**（可选）用索引替换 `ListObjects` 的 `walkMetas` 全目录遍历
 
 依赖顺序：C1 → C2 → C3 → C4 →（C5 与 C6 并行）→ C7。

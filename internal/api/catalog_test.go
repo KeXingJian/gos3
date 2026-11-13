@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,26 @@ func TestAdminCatalogSearchParsing(t *testing.T) {
 	}
 	if body.Gen != 7 || len(body.Docs) != 1 || body.Docs[0].Key != "k" {
 		t.Fatalf("body = %+v", body)
+	}
+}
+
+func TestAdminCatalogSQL(t *testing.T) {
+	h := newAdminTestHandler(t)
+	fc := &fakeCatalog{searchRes: catalog.SearchResult{Gen: 2, Scan: "bucket", Docs: []catalog.Doc{{Bucket: "b", Key: "k", VersionID: "null", Size: 4, IsLatest: true}}}}
+	h.Catalog = fc
+	req := httptest.NewRequest(http.MethodPost, "/gos3/admin/catalog/sql", strings.NewReader(`{"query":"SELECT key,size FROM S3Object WHERE bucket = 'b'"}`))
+	req.SetBasicAuth("root", "rootpass")
+	rec := httptest.NewRecorder()
+	h.ServeAdmin(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"key":"k"`) {
+		t.Fatalf("SQL code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/gos3/admin/catalog/sql", strings.NewReader(`{"query":"DROP TABLE S3Object"}`))
+	req.SetBasicAuth("root", "rootpass")
+	rec = httptest.NewRecorder()
+	h.ServeAdmin(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported SQL code=%d", rec.Code)
 	}
 }
 

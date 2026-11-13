@@ -32,7 +32,8 @@ var (
 	// ErrReadQuorum 表示读取未达到读法定人数：无法判定权威数据，宁可报错也不返回可疑结果。
 	ErrReadQuorum = errors.New("read quorum not reached")
 	// ErrLockTimeout 表示命名空间锁没拿到（锁法定人数不足），调用方应重试。
-	ErrLockTimeout = errors.New("namespace lock not acquired")
+	ErrLockTimeout       = errors.New("namespace lock not acquired")
+	ErrInvalidObjectTags = errors.New("invalid object tags")
 )
 
 const (
@@ -57,6 +58,7 @@ type ObjectInfo struct {
 	ETag         string
 	ContentType  string
 	UserMetadata map[string]string
+	Tags         map[string]string
 	ModTime      time.Time
 }
 
@@ -132,6 +134,9 @@ type Store interface {
 	PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (ObjectInfo, error)
 	GetObject(ctx context.Context, bucket, object, versionID string) (io.ReadSeekCloser, ObjectInfo, error)
 	StatObject(ctx context.Context, bucket, object, versionID string) (ObjectInfo, error)
+	GetObjectTagging(ctx context.Context, bucket, object, versionID string) (map[string]string, error)
+	PutObjectTagging(ctx context.Context, bucket, object, versionID string, tags map[string]string) error
+	DeleteObjectTagging(ctx context.Context, bucket, object, versionID string) error
 	DeleteObject(ctx context.Context, bucket, object, versionID string) (DeleteResult, error)
 	DeleteObjects(ctx context.Context, bucket string, objects []ObjectToDelete) []error
 	ListObjects(ctx context.Context, bucket string, opts ListOptions) (ListObjectsResult, error)

@@ -59,6 +59,13 @@ func TestIndexedPutDelete(t *testing.T) {
 		t.Fatalf("doc mismatch: %+v", d)
 	}
 
+	if err := idx.PutObjectTagging(context.Background(), "bkt", "obj1", "", map[string]string{"env": "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		d, _ := idx.Engine().View().primary.Get(primaryKey("bkt", "obj1", "null"))
+		return d != nil && d.Tags["env"] == "prod"
+	})
 	if _, err := idx.DeleteObject(context.Background(), "bkt", "obj1", ""); err != nil {
 		t.Fatal(err)
 	}

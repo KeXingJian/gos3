@@ -172,6 +172,19 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hasUpload := query.Has("uploadId")
+	if query.Has("tagging") {
+		switch r.Method {
+		case http.MethodGet:
+			s.api.GetObjectTagging(w, r, bucket, object)
+		case http.MethodPut:
+			s.api.PutObjectTagging(w, r, bucket, object)
+		case http.MethodDelete:
+			s.api.DeleteObjectTagging(w, r, bucket, object)
+		default:
+			api.WriteError(w, r, api.ErrMethodNotAllowed)
+		}
+		return
+	}
 	switch r.Method {
 	case http.MethodPut:
 		if hasUpload && query.Has("partNumber") {
@@ -269,8 +282,14 @@ func actionAndResource(r *http.Request) (string, string) {
 	objRes := "arn:aws:s3:::" + bucket + "/" + object
 	switch r.Method {
 	case http.MethodPut:
+		if q.Has("tagging") {
+			return "s3:PutObjectTagging", objRes
+		}
 		return "s3:PutObject", objRes
 	case http.MethodGet:
+		if q.Has("tagging") {
+			return "s3:GetObjectTagging", objRes
+		}
 		if q.Has("uploadId") {
 			return "s3:ListMultipartUploadParts", objRes
 		}
@@ -278,6 +297,9 @@ func actionAndResource(r *http.Request) (string, string) {
 	case http.MethodHead:
 		return "s3:GetObject", objRes
 	case http.MethodDelete:
+		if q.Has("tagging") {
+			return "s3:DeleteObjectTagging", objRes
+		}
 		if q.Has("uploadId") {
 			return "s3:AbortMultipartUpload", objRes
 		}

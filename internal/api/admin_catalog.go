@@ -1,9 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +64,118 @@ func (h *Handler) adminCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("X-Gos3-Catalog-Gen", strconv.FormatUint(res.Gen, 10))
 		writeJSONStatus(w, http.StatusOK, res)
+
+	case "/gos3/admin/catalog/sql":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Query string `json:"query"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+		if err := decoder.Decode(&req); err != nil || strings.TrimSpace(req.Query) == "" {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid SQL request"})
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid SQL request"})
+			return
+		}
+		query, err := catalog.ParseSQL(req.Query)
+		if err != nil {
+			writeCatalogError(w, err)
+			return
+		}
+		filters := query.Alternatives
+		if len(filters) == 0 {
+			filters = []catalog.Filter{query.Filter}
+		}
+		for i := range filters {
+			filters[i].Tag = mergeStringMaps(filters[i].Tag, query.RequiredTags)
+			filters[i].Meta = mergeStringMaps(filters[i].Meta, query.RequiredMeta)
+			filters[i].Limit = catalog.MaxLimit
+		}
+		seen := make(map[string]struct{})
+		var docs []catalog.Doc
+		var gen uint64
+		var scan string
+		for _, f := range filters {
+			res, err := h.Catalog.Search(f)
+			if err != nil {
+				writeCatalogError(w, err)
+				return
+			}
+			gen, scan = res.Gen, res.Scan
+			for _, d := range res.Docs {
+				id := d.Bucket + "\x00" + d.Key + "\x00" + d.VersionID
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				docs = append(docs, d)
+			}
+		}
+		sort.Slice(docs, func(i, j int) bool {
+			if docs[i].Bucket != docs[j].Bucket {
+				return docs[i].Bucket < docs[j].Bucket
+			}
+			if docs[i].Key != docs[j].Key {
+				return docs[i].Key < docs[j].Key
+			}
+			return docs[i].VersionID < docs[j].VersionID
+		})
+		if len(docs) > query.Filter.Limit+1 {
+			docs = docs[:query.Filter.Limit+1]
+		}
+		truncated := len(docs) > query.Filter.Limit
+		if truncated {
+			docs = docs[:query.Filter.Limit]
+		}
+		rows := make([]map[string]any, 0, len(docs))
+		for _, d := range docs {
+			row := make(map[string]any)
+			if query.Count {
+				continue
+			}
+			for _, col := range query.Columns {
+				switch {
+				case col == "*":
+					row = map[string]any{"bucket": d.Bucket, "key": d.Key, "versionId": d.VersionID, "size": d.Size, "etag": d.ETag, "contentType": d.ContentType, "modTime": d.ModTime, "isLatest": d.IsLatest, "deleteMarker": d.DeleteMarker}
+				case strings.EqualFold(col, "bucket"):
+					row["bucket"] = d.Bucket
+				case strings.EqualFold(col, "key"):
+					row[col] = d.Key
+				case strings.EqualFold(col, "size"):
+					row["size"] = d.Size
+				case strings.EqualFold(col, "etag"):
+					row["etag"] = d.ETag
+				case strings.EqualFold(col, "contenttype"):
+					row["contentType"] = d.ContentType
+				case strings.EqualFold(col, "modtime"):
+					row["modTime"] = d.ModTime
+				case strings.EqualFold(col, "versionid"):
+					row["versionId"] = d.VersionID
+				case strings.EqualFold(col, "islatest"):
+					row["isLatest"] = d.IsLatest
+				case strings.EqualFold(col, "deletemarker"):
+					row["deleteMarker"] = d.DeleteMarker
+				case strings.HasPrefix(strings.ToLower(col), "meta."):
+					row[col] = d.UserMeta[col[5:]]
+				case strings.HasPrefix(strings.ToLower(col), "tag."):
+					row[col] = d.Tags[col[4:]]
+				}
+			}
+			rows = append(rows, row)
+		}
+		var result any = map[string]any{"gen": gen, "scan": scan, "columns": query.Columns, "rows": rows, "count": len(docs), "truncated": truncated}
+		if query.Count {
+			result = map[string]any{"gen": gen, "scan": scan, "count": len(docs), "truncated": truncated}
+		}
+		w.Header().Set("X-Gos3-Catalog-Gen", strconv.FormatUint(gen, 10))
+		w.Header().Set("X-Gos3-Catalog-Scan", scan)
+		writeJSONStatus(w, http.StatusOK, result)
 
 	case "/gos3/admin/catalog/status":
 		if r.Method != http.MethodGet {
@@ -217,6 +332,20 @@ func parseCatalogTime(s string) (time.Time, error) {
 func normalizeMetaKey(k string) string {
 	k = strings.ToLower(strings.TrimSpace(k))
 	return strings.TrimPrefix(k, "x-amz-meta-")
+}
+
+func mergeStringMaps(a, b map[string]string) map[string]string {
+	if len(b) == 0 {
+		return a
+	}
+	out := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }
 
 func writeCatalogError(w http.ResponseWriter, err error) {

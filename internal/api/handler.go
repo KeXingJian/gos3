@@ -287,6 +287,60 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request, bucket, obje
 // GET /{bucket}/{object}[?versionId=xxx]
 // 权限：s3:GetObject
 // 响应：200 对象内容，支持 Range（http.ServeContent）；返回 Content-Type、ETag 等头
+func (h *Handler) GetObjectTagging(w http.ResponseWriter, r *http.Request, bucket, object string) {
+	tags, err := h.Store.GetObjectTagging(r.Context(), bucket, object, r.URL.Query().Get("versionId"))
+	if err != nil {
+		h.writeStoreError(w, r, err)
+		return
+	}
+	out := tagging{Xmlns: s3Namespace, TagSet: make([]objectTag, 0, len(tags))}
+	for k, v := range tags {
+		out.TagSet = append(out.TagSet, objectTag{Key: k, Value: v})
+	}
+	writeXML(w, http.StatusOK, out)
+}
+func (h *Handler) PutObjectTagging(w http.ResponseWriter, r *http.Request, bucket, object string) {
+	var in tagging
+	decoder := xml.NewDecoder(io.LimitReader(r.Body, 64<<10))
+	if err := decoder.Decode(&in); err != nil {
+		WriteError(w, r, ErrInvalidArgument)
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		WriteError(w, r, ErrInvalidArgument)
+		return
+	}
+	if len(in.TagSet) > 10 {
+		WriteError(w, r, ErrInvalidArgument)
+		return
+	}
+	tags := make(map[string]string, len(in.TagSet))
+	for _, t := range in.TagSet {
+		if t.Key == "" || len(t.Key) > 128 || len(t.Value) > 256 {
+			WriteError(w, r, ErrInvalidArgument)
+			return
+		}
+		if _, ok := tags[t.Key]; ok {
+			WriteError(w, r, ErrInvalidArgument)
+			return
+		}
+		tags[t.Key] = t.Value
+	}
+	if err := h.Store.PutObjectTagging(r.Context(), bucket, object, r.URL.Query().Get("versionId"), tags); err != nil {
+		h.writeStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+func (h *Handler) DeleteObjectTagging(w http.ResponseWriter, r *http.Request, bucket, object string) {
+	if err := h.Store.DeleteObjectTagging(r.Context(), bucket, object, r.URL.Query().Get("versionId")); err != nil {
+		h.writeStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	versionID := r.URL.Query().Get("versionId")
 	rc, info, err := h.Store.GetObject(r.Context(), bucket, object, versionID)
@@ -696,13 +750,15 @@ func (h *Handler) writeStoreError(w http.ResponseWriter, r *http.Request, err er
 		WriteError(w, r, ErrNoSuchBucket)
 	case errors.Is(err, store.ErrObjectNotFound):
 		WriteError(w, r, ErrNoSuchKey)
+	case errors.Is(err, store.ErrDeleteMarker):
+		WriteError(w, r, ErrNoSuchVersion)
 	case errors.Is(err, store.ErrBucketExists):
 		WriteError(w, r, ErrBucketAlreadyOwnedByYou)
 	case errors.Is(err, store.ErrBucketNotEmpty):
 		WriteError(w, r, ErrBucketNotEmpty)
 	case errors.Is(err, store.ErrInvalidBucketName):
 		WriteError(w, r, ErrInvalidBucketName)
-	case errors.Is(err, store.ErrInvalidObjectName):
+	case errors.Is(err, store.ErrInvalidObjectName), errors.Is(err, store.ErrInvalidObjectTags):
 		WriteError(w, r, ErrInvalidArgument)
 	case errors.Is(err, store.ErrUploadNotFound), errors.Is(err, store.ErrInvalidUploadID):
 		WriteError(w, r, ErrNoSuchUpload)

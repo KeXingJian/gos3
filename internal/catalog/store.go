@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,12 +15,16 @@ import (
 // 未覆盖的方法原样透传（内嵌 Store）。
 type Indexed struct {
 	store.Store
-	eng     *Engine
-	q       chan Event
-	dropped atomic.Uint64
-	log     *slog.Logger
-	stop    chan struct{}
-	done    chan struct{}
+	eng               *Engine
+	q                 chan Event
+	dropped           atomic.Uint64
+	log               *slog.Logger
+	reconcileInterval time.Duration
+	stop              chan struct{}
+	done              chan struct{}
+	reconcileDone     chan struct{}
+	reconcileMu       sync.Mutex
+	applyMu           sync.RWMutex
 }
 
 // New 构建 Catalog：创建引擎（含全量重建源）并用 Indexed 包装底层 store。
@@ -32,7 +37,15 @@ func New(st store.Store, cfg Config, log *slog.Logger) (*Indexed, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewIndexed(st, eng, 0, log), nil
+	indexed := NewIndexed(st, eng, 0, log)
+	interval := cfg.ReconcileInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	indexed.reconcileInterval = interval
+	indexed.reconcileDone = make(chan struct{})
+	go indexed.reconcileLoop()
+	return indexed, nil
 }
 
 // NewIndexed 用指定引擎包装底层 store。
@@ -49,21 +62,48 @@ func NewIndexed(st store.Store, eng *Engine, queueSize int, log *slog.Logger) *I
 }
 
 // run 串行消费事件队列，调用引擎 Append（单写者，保持 seq 有序）。
+func (s *Indexed) reconcileLoop() {
+	defer close(s.reconcileDone)
+	ticker := time.NewTicker(s.reconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.reconcileMu.Lock()
+			s.applyMu.Lock()
+			if err := s.eng.Rebuild(); err != nil {
+				s.log.Warn("[gos3: catalog-reconcile-failed]", "error", err.Error())
+			} else {
+				s.dropped.Store(0)
+				s.log.Info("[gos3: catalog-reconciled]", "docs", s.eng.Status().Docs)
+			}
+			s.applyMu.Unlock()
+			s.reconcileMu.Unlock()
+		case <-s.stop:
+			return
+		}
+	}
+}
+
 func (s *Indexed) run() {
 	defer close(s.done)
 	for {
 		select {
 		case ev := <-s.q:
+			s.applyMu.RLock()
 			if err := s.eng.Append(ev); err != nil {
 				s.log.Warn("[gos3: catalog-apply-failed]", "error", err.Error())
 			}
+			s.applyMu.RUnlock()
 		case <-s.stop:
 			for {
 				select {
 				case ev := <-s.q:
+					s.applyMu.RLock()
 					if err := s.eng.Append(ev); err != nil {
 						s.log.Warn("[gos3: catalog-apply-failed]", "error", err.Error())
 					}
+					s.applyMu.RUnlock()
 				default:
 					return
 				}
@@ -85,6 +125,9 @@ func (s *Indexed) enqueue(ev Event) {
 func (s *Indexed) Close() {
 	close(s.stop)
 	<-s.done
+	if s.reconcileDone != nil {
+		<-s.reconcileDone
+	}
 	_ = s.eng.Close()
 }
 
@@ -109,6 +152,12 @@ func (s *Indexed) Status() Status {
 // Rebuild 触发一次全量重建（管理端 reindex）。重建以 sidecar 为真相，
 // 成功后可清空累计 dropped 计数，让 status 从 lagging 回到 ready。
 func (s *Indexed) Rebuild() error {
+	if s.reconcileDone != nil {
+		s.reconcileMu.Lock()
+		defer s.reconcileMu.Unlock()
+	}
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	if err := s.eng.Rebuild(); err != nil {
 		return err
 	}
@@ -171,6 +220,36 @@ func (s *Indexed) indexDelete(bucket, object string, res store.DeleteResult) {
 	s.enqueue(Event{Op: OpDel, Doc: Doc{Bucket: bucket, Key: object, VersionID: res.VersionID}})
 }
 
+func (s *Indexed) PutObjectTagging(ctx context.Context, bucket, object, versionID string, tags map[string]string) error {
+	if err := s.Store.PutObjectTagging(ctx, bucket, object, versionID, tags); err != nil {
+		return err
+	}
+	if versionID == "" {
+		versionID = store.NullVersionID
+	}
+	s.enqueueTagVersion(ctx, bucket, object, versionID)
+	return nil
+}
+func (s *Indexed) DeleteObjectTagging(ctx context.Context, bucket, object, versionID string) error {
+	if err := s.Store.DeleteObjectTagging(ctx, bucket, object, versionID); err != nil {
+		return err
+	}
+	if versionID == "" {
+		versionID = store.NullVersionID
+	}
+	s.enqueueTagVersion(ctx, bucket, object, versionID)
+	return nil
+}
+func (s *Indexed) enqueueTagVersion(ctx context.Context, bucket, object, versionID string) {
+	_ = s.Store.WalkVersions(ctx, bucket, func(v store.VersionInfo) error {
+		if v.Name == object && (versionID == v.VersionID || versionID == "" && v.IsLatest) {
+			d := docFromObjectInfo(v.ObjectInfo, v.IsLatest)
+			s.enqueue(Event{Op: OpPut, Doc: d})
+		}
+		return nil
+	})
+}
+
 func (s *Indexed) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []store.CompletePart) (store.ObjectInfo, error) {
 	info, err := s.Store.CompleteMultipartUpload(ctx, bucket, object, uploadID, parts)
 	if err == nil {
@@ -191,7 +270,7 @@ func docFromObjectInfo(info store.ObjectInfo, latest bool) Doc {
 		Bucket: info.Bucket, Key: info.Name, VersionID: info.VersionID,
 		IsLatest: latest, DeleteMarker: info.DeleteMarker,
 		Size: info.Size, ETag: info.ETag, ContentType: info.ContentType,
-		UserMeta: info.UserMetadata, ModTime: info.ModTime,
+		UserMeta: info.UserMetadata, Tags: info.Tags, ModTime: info.ModTime,
 	}
 }
 

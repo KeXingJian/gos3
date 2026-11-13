@@ -31,6 +31,7 @@ var (
 type Filter struct {
 	Bucket      string
 	Prefix      string
+	Key         string
 	ContentType string
 
 	MinSize    int64
@@ -163,6 +164,9 @@ func (f Filter) match(d *Doc) bool {
 	if f.Prefix != "" && !strings.HasPrefix(d.Key, f.Prefix) {
 		return false
 	}
+	if f.Key != "" && d.Key != f.Key {
+		return false
+	}
 	if f.ContentType != "" && d.ContentType != f.ContentType {
 		return false
 	}
@@ -279,6 +283,10 @@ type queryDoc struct {
 // 返回的迭代器只在读锁内使用。
 func (ix *memoryIndex) candidates(f Filter, tok *pageToken) (string, func(func(*Doc) bool)) {
 	if f.Bucket != "" {
+		if f.Key != "" {
+			prefix := primaryKey(f.Bucket, f.Key, "")
+			return "bucket", scanPrimary(ix.primary, prefix, prefix)
+		}
 		// 1) user-meta 等值（仅白名单 key 有索引）
 		for _, k := range sortedKeys(f.Meta) {
 			if ix.cfg.allowMeta(k) {

@@ -60,6 +60,16 @@ type locationConstraint struct {
 	Value   string   `xml:",chardata"`
 }
 
+type objectTag struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
+}
+type tagging struct {
+	XMLName xml.Name    `xml:"Tagging"`
+	Xmlns   string      `xml:"xmlns,attr"`
+	TagSet  []objectTag `xml:"TagSet>Tag"`
+}
+
 type versioningConfiguration struct {
 	XMLName xml.Name `xml:"VersioningConfiguration"`
 	Xmlns   string   `xml:"xmlns,attr"`

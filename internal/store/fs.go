@@ -37,6 +37,7 @@ type fsVersion struct {
 	ETag         string            `json:"etag"`
 	ContentType  string            `json:"contentType"`
 	UserMetadata map[string]string `json:"userMetadata,omitempty"`
+	Tags         map[string]string `json:"tags,omitempty"`
 	ModTime      time.Time         `json:"modTime"`
 	// DataID 是该版本分片数据的存储键。纠删码后端每次写入都会分配一个新的 DataID，
 	// 这样即使是「null」版本的覆盖写，「先写新、提交后再删旧」也不会出现同路径覆盖窗口；
@@ -102,6 +103,7 @@ func (v fsVersion) toInfo(bucket, object string) ObjectInfo {
 		ETag:         v.ETag,
 		ContentType:  v.ContentType,
 		UserMetadata: v.UserMetadata,
+		Tags:         v.Tags,
 		ModTime:      v.ModTime,
 	}
 }
@@ -490,6 +492,86 @@ func (f *FS) StatObject(ctx context.Context, bucket, object, versionID string) (
 		return ObjectInfo{}, ErrDeleteMarker
 	}
 	return version.toInfo(bucket, object), nil
+}
+
+func (f *FS) GetObjectTagging(ctx context.Context, bucket, object, versionID string) (map[string]string, error) {
+	if !validBucketName(bucket) {
+		return nil, ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return nil, ErrInvalidObjectName
+	}
+	if _, exists, err := f.BucketExists(ctx, bucket); err != nil {
+		return nil, err
+	} else if !exists {
+		return nil, ErrBucketNotFound
+	}
+	meta, err := f.readObjectMeta(bucket, object)
+	if err != nil {
+		return nil, err
+	}
+	version, _, ok := resolveVersion(meta, versionID)
+	if !ok {
+		return nil, ErrNoSuchVersion
+	}
+	if version.DeleteMarker {
+		return nil, ErrDeleteMarker
+	}
+	tags := make(map[string]string, len(version.Tags))
+	for k, v := range version.Tags {
+		tags[k] = v
+	}
+	return tags, nil
+}
+
+func (f *FS) PutObjectTagging(ctx context.Context, bucket, object, versionID string, tags map[string]string) error {
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return ErrInvalidObjectName
+	}
+	if _, exists, err := f.BucketExists(ctx, bucket); err != nil {
+		return err
+	} else if !exists {
+		return ErrBucketNotFound
+	}
+	if len(tags) > 10 {
+		return ErrInvalidObjectTags
+	}
+	for k, v := range tags {
+		if k == "" || len(k) > 128 || len(v) > 256 {
+			return ErrInvalidObjectTags
+		}
+	}
+	meta, err := f.readObjectMeta(bucket, object)
+	if err != nil {
+		return err
+	}
+	_, i, ok := resolveVersion(meta, versionID)
+	if !ok {
+		return ErrNoSuchVersion
+	}
+	if meta.Versions[i].DeleteMarker {
+		return ErrDeleteMarker
+	}
+	meta.Versions[i].Tags = cloneTags(tags)
+	return f.writeObjectMeta(bucket, object, meta)
+}
+
+func (f *FS) DeleteObjectTagging(ctx context.Context, bucket, object, versionID string) error {
+	return f.PutObjectTagging(ctx, bucket, object, versionID, nil)
+}
+
+func cloneTags(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(tags))
+	for k, v := range tags {
+		out[k] = v
+	}
+	return out
 }
 
 func (f *FS) DeleteObject(ctx context.Context, bucket, object, versionID string) (DeleteResult, error) {

@@ -11,11 +11,12 @@ import (
 
 // Config 是 Catalog 引擎的配置。
 type Config struct {
-	Dir      string      // 目录（本地，节点私有）
-	Gen      uint64      // 初始 gen（无 manifest 时使用）
-	Wal      WalConfig   // WAL 持久化策略（Dir 字段忽略，用 Config.Dir）
-	Index    IndexConfig // 建索引策略
-	SnapDocs int         // 累计 WAL 记录数达到则触发快照（<=0 不自动快照）
+	Dir               string        // 目录（本地，节点私有）
+	Gen               uint64        // 初始 gen（无 manifest 时使用）
+	Wal               WalConfig     // WAL 持久化策略（Dir 字段忽略，用 Config.Dir）
+	Index             IndexConfig   // 建索引策略
+	SnapDocs          int           // 累计 WAL 记录数达到则触发快照（<=0 不自动快照）
+	ReconcileInterval time.Duration // 周期性从共享 sidecar 全量对账（<=0 使用默认间隔）
 }
 
 // Status 是引擎/装饰器的运行状态摘要。

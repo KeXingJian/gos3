@@ -434,6 +434,72 @@ func (e *Erasure) PutObject(ctx context.Context, bucket, object string, data io.
 	return info, nil
 }
 
+func (e *Erasure) GetObjectTagging(ctx context.Context, bucket, object, versionID string) (map[string]string, error) {
+	if !validBucketName(bucket) {
+		return nil, ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return nil, ErrInvalidObjectName
+	}
+	meta, err := e.readMetaQuorum(ctx, bucket, object)
+	if err != nil {
+		return nil, err
+	}
+	v, _, ok := resolveVersion(meta, versionID)
+	if !ok {
+		return nil, ErrNoSuchVersion
+	}
+	if v.DeleteMarker {
+		return nil, ErrDeleteMarker
+	}
+	return cloneTags(v.Tags), nil
+}
+
+func (e *Erasure) PutObjectTagging(ctx context.Context, bucket, object, versionID string, tags map[string]string) error {
+	if len(tags) > 10 {
+		return ErrInvalidObjectTags
+	}
+	for k, v := range tags {
+		if k == "" || len(k) > 128 || len(v) > 256 {
+			return ErrInvalidObjectTags
+		}
+	}
+	if !validBucketName(bucket) {
+		return ErrInvalidBucketName
+	}
+	if !validObjectName(object) {
+		return ErrInvalidObjectName
+	}
+	unlock, err := e.lockObject(ctx, bucket, object)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	meta, err := e.readMetaQuorum(ctx, bucket, object)
+	if err != nil {
+		return err
+	}
+	_, i, ok := resolveVersion(meta, versionID)
+	if !ok {
+		return ErrNoSuchVersion
+	}
+	if meta.Versions[i].DeleteMarker {
+		return ErrDeleteMarker
+	}
+	old := meta
+	meta.Versions = append([]fsVersion(nil), meta.Versions...)
+	meta.Versions[i].Tags = cloneTags(tags)
+	if err := e.writeMetaAll(ctx, bucket, object, meta); err != nil {
+		e.restoreMeta(ctx, bucket, object, old)
+		return err
+	}
+	return nil
+}
+
+func (e *Erasure) DeleteObjectTagging(ctx context.Context, bucket, object, versionID string) error {
+	return e.PutObjectTagging(ctx, bucket, object, versionID, nil)
+}
+
 func (e *Erasure) GetObject(ctx context.Context, bucket, object, versionID string) (io.ReadSeekCloser, ObjectInfo, error) {
 	if !validBucketName(bucket) {
 		return nil, ObjectInfo{}, ErrInvalidBucketName

@@ -153,6 +153,7 @@
   #status.ok{background:#0f9d58}
   #status code{color:inherit}
   @media(max-width:820px){.sidebar{display:none}.grid{grid-template-columns:1fr}}
+  @media(max-width:1100px){.catalog-grid{grid-template-columns:240px 1fr}.catalog-filters .row{gap:6px}.catalog-filters .field{min-width:100%}}
 </style>
 </head>
 <body>
@@ -194,6 +195,11 @@
       <button data-tab="policies" data-admin-only onclick="tab('policies')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         Policies
+      </button>
+      <label data-admin-only>Data</label>
+      <button data-tab="catalog" data-admin-only onclick="tab('catalog')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+        Metadata Catalog
       </button>
     </nav>
     <div class="side-foot">
@@ -268,6 +274,39 @@
             <thead><tr><th>Access key</th><th>Status</th><th>Policies</th><th></th></tr></thead>
             <tbody id="userRows"></tbody>
           </table>
+        </div>
+      </section>
+
+      <section id="tab-catalog" class="panel">
+        <div class="row">
+          <button class="ghost" onclick="loadCatalogStatus()">Refresh status</button>
+          <button class="ghost" onclick="reindexCatalog()">Reindex</button>
+          <span id="catalogStatus" class="muted"></span>
+        </div>
+        <div class="grid catalog-grid">
+          <div class="card catalog-filters">
+            <div class="card-head"><span class="title">筛选条件</span></div>
+            <div class="card-body">
+              <label class="field"><span>Bucket</span><select id="catBucket"><option value="">所有 Bucket</option></select></label>
+              <label class="field"><span>Key 前缀</span><input id="catPrefix" placeholder="例如 logs/2026/"></label>
+              <label class="field"><span>Content-Type</span><input id="catContentType" placeholder="例如 image/jpeg"></label>
+              <div class="row"><label class="field" style="flex:1"><span>最小 Size (bytes)</span><input id="catMinSize" type="number" min="0"></label><label class="field" style="flex:1"><span>最大 Size (bytes)</span><input id="catMaxSize" type="number" min="0"></label></div>
+              <label class="field"><span>修改时间起始（含）</span><input id="catAfter" type="datetime-local"></label>
+              <label class="field"><span>修改时间截止（不含）</span><input id="catBefore" type="datetime-local"></label>
+              <label class="field"><span>User metadata (key=value)</span><input id="catMeta" placeholder="owner=alice"></label>
+              <label class="field"><span>Object tag (key=value)</span><input id="catTag" placeholder="env=prod"></label>
+              <label class="chk"><input id="catVersions" type="checkbox"><span>包含历史版本</span></label>
+              <label class="chk"><input id="catDeleteMarkers" type="checkbox"><span>包含删除标记</span></label>
+              <div class="row" style="margin:14px 0 0"><button class="btn" onclick="searchCatalog(true)">搜索</button><button class="ghost" onclick="resetCatalogFilters()">清除</button></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head"><span class="title">对象元数据</span><span id="catalogSummary" class="right muted"></span></div>
+            <div class="card-body" style="overflow:auto">
+              <table><thead><tr><th>Bucket</th><th>Key</th><th>Size</th><th>Content-Type</th><th>Modified</th><th>ETag</th><th>Tags</th></tr></thead><tbody id="catalogRows"><tr><td colspan="7" class="empty">设置筛选条件后搜索</td></tr></tbody></table>
+              <div class="row" style="margin:14px 0 0"><span id="catalogScan" class="muted"></span><button id="catalogMore" class="ghost sm" style="display:none" onclick="searchCatalog(false)">下一页</button></div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -362,7 +401,9 @@ let currentBucket = null;
 let currentShareKey = null;
 let statusTimer = null;
 
-const TITLES = { buckets:['Buckets','Object storage browser'], users:['Users','Identity & access keys'], policies:['Policies','IAM policy documents'] };
+const TITLES = { buckets:['Buckets','Object storage browser'], users:['Users','Identity & access keys'], policies:['Policies','IAM policy documents'], catalog:['Metadata Catalog','按对象属性筛选与检查元数据索引'] };
+let catalogNextToken = '';
+let catalogLastQuery = null;
 
 function setStatus(msg, cls) {
   const el = document.getElementById('status');
@@ -410,7 +451,7 @@ async function connect() {
     document.getElementById('sessionUser').textContent = user + (isRoot ? ' · root' : '');
     applyRole();
     loadBuckets();
-    if (isRoot) { loadUsers(); loadPolicies(); }
+    if (isRoot) { loadUsers(); loadPolicies(); loadCatalogBuckets(); loadCatalogStatus(); }
   } catch (e) {
     creds = null;
     isRoot = false;
@@ -624,6 +665,79 @@ async function deleteObject(key) {
     await api('DELETE', '/gos3/admin/buckets/' + encodeURIComponent(currentBucket) + '/objects/' + enc(key));
     setStatus('deleted ' + key, 'ok'); loadObjects();
   } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+async function loadCatalogBuckets() {
+  try {
+    const buckets = await api('GET', '/gos3/admin/buckets');
+    const sel = document.getElementById('catBucket');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">所有 Bucket</option>';
+    (buckets || []).forEach(b => { const o = document.createElement('option'); o.value = b.name; o.textContent = b.name; sel.appendChild(o); });
+    sel.value = current;
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+function catalogMetaQuery(input, prefix, params) {
+  const s = input.trim(); if (!s) return;
+  const i = s.indexOf('=');
+  if (i <= 0) throw new Error('元数据/tag 请使用 key=value 格式');
+  params.set(prefix + s.slice(0, i).trim(), s.slice(i + 1));
+}
+
+function catalogSearchParams() {
+  const p = new URLSearchParams();
+  const fields = [['catBucket','bucket'],['catPrefix','prefix'],['catContentType','contentType'],['catMinSize','minSize'],['catMaxSize','maxSize']];
+  fields.forEach(([id,key]) => { const v = document.getElementById(id).value.trim(); if (v) p.set(key,v); });
+  ['catAfter','catBefore'].forEach((id,i) => { const v = document.getElementById(id).value; if (v) p.set(i ? 'before':'after',new Date(v).toISOString()); });
+  if (document.getElementById('catVersions').checked) p.set('versions','true');
+  if (document.getElementById('catDeleteMarkers').checked) p.set('deleteMarkers','true');
+  catalogMetaQuery(document.getElementById('catMeta').value,'meta.',p);
+  catalogMetaQuery(document.getElementById('catTag').value,'tag.',p);
+  p.set('limit','100');
+  return p;
+}
+
+async function searchCatalog(first) {
+  if (!isRoot) return;
+  try {
+    if (first) { catalogNextToken = ''; catalogLastQuery = catalogSearchParams(); document.getElementById('catalogRows').innerHTML = ''; }
+    if (!catalogLastQuery) catalogLastQuery = catalogSearchParams();
+    const params = new URLSearchParams(catalogLastQuery);
+    if (catalogNextToken) params.set('token',catalogNextToken);
+    const res = await api('GET','/gos3/admin/catalog/search?' + params.toString());
+    const tbody = document.getElementById('catalogRows');
+    if (!res.docs.length && first) tbody.innerHTML = '<tr><td colspan="7" class="empty">没有匹配对象</td></tr>';
+    (res.docs || []).forEach(d => {
+      const tr = document.createElement('tr');
+      const cells = [d.bucket,d.key,String(d.size),d.contentType || '',d.modTime || '',d.etag || '',Object.entries(d.tags || {}).map(([k,v]) => k + '=' + v).join(', ')];
+      cells.forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
+      tbody.appendChild(tr);
+    });
+    catalogNextToken = res.nextToken || '';
+    document.getElementById('catalogMore').style.display = catalogNextToken ? '' : 'none';
+    document.getElementById('catalogSummary').textContent = res.docs.length + ' rows · generation ' + res.gen;
+    document.getElementById('catalogScan').textContent = '扫描模式：' + (res.scan || 'n/a') + ' · 扫描 ' + res.scanned + ' 条';
+  } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+function resetCatalogFilters() {
+  ['catBucket','catPrefix','catContentType','catMinSize','catMaxSize','catAfter','catBefore','catMeta','catTag'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('catVersions').checked = false; document.getElementById('catDeleteMarkers').checked = false;
+  catalogNextToken = ''; catalogLastQuery = null; document.getElementById('catalogRows').innerHTML = '<tr><td colspan="7" class="empty">设置筛选条件后搜索</td></tr>';
+  document.getElementById('catalogSummary').textContent = ''; document.getElementById('catalogScan').textContent = '';
+}
+
+async function loadCatalogStatus() {
+  if (!isRoot) return;
+  try { const s = await api('GET','/gos3/admin/catalog/status'); document.getElementById('catalogStatus').textContent = s.state + ' · ' + s.docs + ' docs · gen ' + s.gen + ' · queued ' + s.queued; }
+  catch (e) { document.getElementById('catalogStatus').textContent = String(e.message || e); }
+}
+
+async function reindexCatalog() {
+  if (!isRoot || !confirm('从对象元数据 sidecar 全量重建索引？')) return;
+  try { await api('POST','/gos3/admin/catalog/reindex'); setStatus('catalog reindex complete','ok'); loadCatalogStatus(); if (catalogLastQuery) searchCatalog(true); }
+  catch (e) { setStatus(String(e.message || e),'err'); }
 }
 
 async function loadUsers() {

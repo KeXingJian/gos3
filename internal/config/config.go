@@ -39,6 +39,7 @@ type Config struct {
 	CatalogMetaWhitelist []string
 	// CatalogTagWhitelist 允许建二级索引的 tag key
 	CatalogTagWhitelist []string
+	CatalogReconcile    time.Duration
 }
 
 func Default() Config {

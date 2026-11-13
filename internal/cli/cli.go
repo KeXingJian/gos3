@@ -56,6 +56,7 @@ SERVER FLAGS:
   -catalog-dir     catalog index directory (default <data-dir>/.catalog)
   -catalog-meta-whitelist  comma-separated user-meta keys to index
   -catalog-tag-whitelist   comma-separated tag keys to index
+  -catalog-reconcile      full sidecar reconcile interval (default 5m)
 `
 
 func Main(args []string) int {
@@ -97,6 +98,7 @@ func runServer(args []string) int {
 	fs.DurationVar(&cfg.ScanInterval, "scan-interval", cfg.ScanInterval, "lifecycle scan interval")
 	fs.BoolVar(&cfg.Catalog, "catalog", cfg.Catalog, "enable metadata catalog (index)")
 	fs.StringVar(&cfg.CatalogDir, "catalog-dir", "", "catalog index directory (default <data-dir>/.catalog)")
+	fs.DurationVar(&cfg.CatalogReconcile, "catalog-reconcile", 5*time.Minute, "full metadata catalog reconcile interval")
 	// 白名单决定哪些 user-meta / tag 会进二级索引；不配则只索引系统字段。
 	metaWhitelistFlag := fs.String("catalog-meta-whitelist", "", "comma-separated user-meta keys to index (lowercase, without x-amz-meta- prefix)")
 	tagWhitelistFlag := fs.String("catalog-tag-whitelist", "", "comma-separated tag keys to index")
@@ -170,10 +172,11 @@ func runServer(args []string) int {
 			catDir = filepath.Join(cfg.DataDir, ".catalog")
 		}
 		indexed, err := catalog.New(st, catalog.Config{
-			Dir:      catDir,
-			Wal:      catalog.WalConfig{Dir: catDir},
-			Index:    catalog.IndexConfig{MetaWhitelist: whitelistSet(cfg.CatalogMetaWhitelist, true), TagWhitelist: whitelistSet(cfg.CatalogTagWhitelist, false)},
-			SnapDocs: 1_000_000,
+			Dir:               catDir,
+			Wal:               catalog.WalConfig{Dir: catDir},
+			Index:             catalog.IndexConfig{MetaWhitelist: whitelistSet(cfg.CatalogMetaWhitelist, true), TagWhitelist: whitelistSet(cfg.CatalogTagWhitelist, false)},
+			SnapDocs:          1_000_000,
+			ReconcileInterval: cfg.CatalogReconcile,
 		}, logger)
 		if err != nil {
 			logger.Error("[gos3: catalog-init-failed]", "error", err.Error())
