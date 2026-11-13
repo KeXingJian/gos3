@@ -67,13 +67,15 @@
   .topbar h1{font-size:20px;margin:0;font-weight:700;letter-spacing:-.2px}
   .topbar .sub{color:var(--muted);font-size:12px;margin-top:2px}
   .login{margin-left:auto;display:flex;gap:8px;align-items:center}
-  .content{padding:24px 28px 64px;max-width:1200px;width:100%}
+  .content{padding:10px;width:100%}
 
-  input,textarea,select{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 11px;outline:none;transition:border-color .15s,box-shadow .15s}
+  input,textarea,select{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px;outline:none;transition:border-color .15s,box-shadow .15s}
   input:focus,textarea:focus,select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(22,93,255,.12)}
   textarea{width:100%;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 
-  button.btn,label.btn{background:var(--primary);border:1px solid var(--primary);color:#fff;border-radius:8px;padding:8px 14px;font-weight:500;transition:background .15s,border-color .15s}
+  button.btn,label.btn,button.ghost,button.danger{border-radius:8px;padding:8px 14px;font-weight:500;transition:background .15s,border-color .15s}
+  button.btn,label.btn{background:var(--primary);border:1px solid var(--primary);color:#fff}
+  button.btn{padding: 9px}
   label.btn{display:inline-block;cursor:pointer}
   button.btn:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
   button.ghost{background:var(--surface);border:1px solid var(--border);color:var(--text)}
@@ -86,7 +88,7 @@
   .panel.active{display:block;animation:fade .18s ease}
   @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
   .row .spacer{flex:1}
   .grid{display:grid;grid-template-columns:280px 1fr;gap:20px;align-items:start}
   .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
@@ -120,6 +122,12 @@
   .muted{color:var(--muted)}
   .right{margin-left:auto;display:flex;gap:8px}
   .empty{color:var(--muted);text-align:center;padding:28px 16px}
+  .table-scroll{max-height:72vh;overflow:auto;margin:4px -4px 0}
+  .filter-panel{margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:9px;background:var(--surface-2)}
+  .filter-panel .row{gap:6px}
+  .filter-panel .field{margin-bottom:7px}
+  .filter-panel .field span{margin-bottom:3px}
+  .filter-panel .field input,.filter-panel .field select{padding:4px 6px;font-size:12.5px}
 
   .overlay{position:fixed;inset:0;background:rgba(16,24,40,.45);display:none;align-items:center;justify-content:center;z-index:40;padding:16px}
   .overlay.show{display:flex}
@@ -153,7 +161,6 @@
   #status.ok{background:#0f9d58}
   #status code{color:inherit}
   @media(max-width:820px){.sidebar{display:none}.grid{grid-template-columns:1fr}}
-  @media(max-width:1100px){.catalog-grid{grid-template-columns:240px 1fr}.catalog-filters .row{gap:6px}.catalog-filters .field{min-width:100%}}
 </style>
 </head>
 <body>
@@ -196,11 +203,6 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         Policies
       </button>
-      <label data-admin-only>Data</label>
-      <button data-tab="catalog" data-admin-only onclick="tab('catalog')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-        Metadata Catalog
-      </button>
     </nav>
     <div class="side-foot">
       <div id="connState" class="conn"><span class="dot"></span><span id="connText">not connected</span></div>
@@ -211,7 +213,7 @@
     <header class="topbar">
       <div>
         <h1 id="pageTitle">Buckets</h1>
-        <div id="pageSub" class="sub">Object storage browser</div>
+        <div id="pageSub" class="sub">对象浏览 · 元数据筛选</div>
       </div>
       <div id="session" class="session">
         <span class="badge on" id="sessionUser"></span>
@@ -221,39 +223,80 @@
 
     <div class="content">
       <section id="tab-buckets" class="panel active">
-        <div class="row">
-          <button class="btn" onclick="openCreateBucket()">Create Bucket</button>
-          <button class="ghost" onclick="loadBuckets()">Refresh</button>
-        </div>
         <div class="grid">
           <div class="card">
             <div class="card-head"><span class="title">Buckets</span><span class="right muted" id="bucketCount"></span></div>
-            <div class="card-body flush"><ul id="bucketList" class="list"></ul></div>
+            <div class="card-body">
+              <div class="row">
+                <button class="btn" onclick="openCreateBucket()">Create Bucket</button>
+                <button class="ghost" onclick="loadBuckets()">Refresh</button>
+              </div>
+              <ul id="bucketList" class="list"></ul>
+              <div id="filterPanel" class="filter-panel">
+                <div class="row">
+                  <label class="field"><span>Prefix</span><input id="prefix" placeholder="prefix"></label>
+                  <label class="field"><span>Content-Type</span><input id="catContentType" placeholder="例如 image/jpeg"></label>
+                </div>
+                <div class="row">
+                  <label class="field" style="flex:1"><span>最小 Size</span><input id="catMinSize" type="number" min="0" step="any"></label>
+                  <label class="field" style="flex:1"><span>最大 Size</span><input id="catMaxSize" type="number" min="0" step="any"></label>
+                  <label class="field"><span>单位</span>
+                    <select id="catSizeFilterUnit" style="width:100%">
+                      <option value="B">B</option><option value="KB">KB</option><option value="MB">MB</option><option value="GB">GB</option><option value="TB">TB</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="row">
+                  <label class="field"><span>修改时间开始</span><input id="catAfter" type="datetime-local"></label>
+                  <label class="field"><span>修改时间截止</span><input id="catBefore" type="datetime-local"></label>
+                </div>
+                <div class="row">
+                  <label class="field"><span>User metadata</span><input id="catMeta" placeholder="alice"></label>
+                  <label class="field"><span>Object tag</span><input id="catTag" placeholder="prod"></label>
+                </div>
+                <div class="row" style="margin-top:2px">
+                  <button class="btn sm" onclick="searchObjects(true)">搜索</button>
+                  <button class="ghost sm" onclick="resetFilters()">清除</button>
+                  <button class="ghost sm" data-admin-only onclick="reindexCatalog()">Reindex</button>
+                </div>
+                <div id="catalogScan" class="muted" style="font-size:12px;margin-top:8px"></div>
+                <div id="catalogStatus" class="muted" style="font-size:12px;margin-top:4px"></div>
+              </div>
+            </div>
           </div>
           <div class="card">
             <div class="card-head">
               <svg class="muted" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
               <b class="title" id="bucketTitle">no bucket selected</b>
               <span class="right">
+                <label class="btn">
+                  Upload
+                  <input id="file" type="file" multiple onchange="uploadFiles()" style="display:none">
+                </label>
                 <button class="ghost sm" onclick="loadObjects()">Refresh</button>
                 <button class="danger sm" onclick="deleteBucket()">Delete Bucket</button>
               </span>
             </div>
             <div class="card-body">
-              <div class="row">
-                <input id="prefix" placeholder="prefix" style="width:200px">
-                <input id="delimiter" placeholder="delimiter" value="/" style="width:90px">
-                <button class="ghost" onclick="loadObjects()">List</button>
-                <span class="spacer"></span>
-                <label class="btn">
-                  Upload
-                  <input id="file" type="file" multiple onchange="uploadFiles()" style="display:none">
-                </label>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>Key</th><th>Size</th><th>ETag</th><th>Modified</th><th></th></tr></thead>
+                  <tbody id="objectRows"></tbody>
+                </table>
               </div>
-              <table>
-                <thead><tr><th>Key</th><th>Size</th><th>ETag</th><th>Modified</th><th></th></tr></thead>
-                <tbody id="objectRows"></tbody>
-              </table>
+              <div class="row" style="margin-top:14px">
+                <span id="objectPageInfo" class="muted"></span>
+                <span class="spacer"></span>
+                <select id="objLimit" style="width:92px" onchange="loadObjects(true)">
+                  <option value="50">50 / 页</option>
+                  <option value="100" selected>100 / 页</option>
+                  <option value="200">200 / 页</option>
+                  <option value="500">500 / 页</option>
+                </select>
+                <button id="objPrev" class="ghost sm" style="display:none" onclick="loadObjectsPrev()">上一页</button>
+                <button id="objNext" class="ghost sm" style="display:none" onclick="loadObjectsNext()">下一页</button>
+                <button id="catalogMore" class="ghost sm" style="display:none" onclick="searchObjects(false)">搜索下一页</button>
+              </div>
             </div>
           </div>
         </div>
@@ -274,39 +317,6 @@
             <thead><tr><th>Access key</th><th>Status</th><th>Policies</th><th></th></tr></thead>
             <tbody id="userRows"></tbody>
           </table>
-        </div>
-      </section>
-
-      <section id="tab-catalog" class="panel">
-        <div class="row">
-          <button class="ghost" onclick="loadCatalogStatus()">Refresh status</button>
-          <button class="ghost" onclick="reindexCatalog()">Reindex</button>
-          <span id="catalogStatus" class="muted"></span>
-        </div>
-        <div class="grid catalog-grid">
-          <div class="card catalog-filters">
-            <div class="card-head"><span class="title">筛选条件</span></div>
-            <div class="card-body">
-              <label class="field"><span>Bucket</span><select id="catBucket"><option value="">所有 Bucket</option></select></label>
-              <label class="field"><span>Key 前缀</span><input id="catPrefix" placeholder="例如 logs/2026/"></label>
-              <label class="field"><span>Content-Type</span><input id="catContentType" placeholder="例如 image/jpeg"></label>
-              <div class="row"><label class="field" style="flex:1"><span>最小 Size (bytes)</span><input id="catMinSize" type="number" min="0"></label><label class="field" style="flex:1"><span>最大 Size (bytes)</span><input id="catMaxSize" type="number" min="0"></label></div>
-              <label class="field"><span>修改时间起始（含）</span><input id="catAfter" type="datetime-local"></label>
-              <label class="field"><span>修改时间截止（不含）</span><input id="catBefore" type="datetime-local"></label>
-              <label class="field"><span>User metadata (key=value)</span><input id="catMeta" placeholder="owner=alice"></label>
-              <label class="field"><span>Object tag (key=value)</span><input id="catTag" placeholder="env=prod"></label>
-              <label class="chk"><input id="catVersions" type="checkbox"><span>包含历史版本</span></label>
-              <label class="chk"><input id="catDeleteMarkers" type="checkbox"><span>包含删除标记</span></label>
-              <div class="row" style="margin:14px 0 0"><button class="btn" onclick="searchCatalog(true)">搜索</button><button class="ghost" onclick="resetCatalogFilters()">清除</button></div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-head"><span class="title">对象元数据</span><span id="catalogSummary" class="right muted"></span></div>
-            <div class="card-body" style="overflow:auto">
-              <table><thead><tr><th>Bucket</th><th>Key</th><th>Size</th><th>Content-Type</th><th>Modified</th><th>ETag</th><th>Tags</th></tr></thead><tbody id="catalogRows"><tr><td colspan="7" class="empty">设置筛选条件后搜索</td></tr></tbody></table>
-              <div class="row" style="margin:14px 0 0"><span id="catalogScan" class="muted"></span><button id="catalogMore" class="ghost sm" style="display:none" onclick="searchCatalog(false)">下一页</button></div>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -400,10 +410,26 @@ let isRoot = false;
 let currentBucket = null;
 let currentShareKey = null;
 let statusTimer = null;
+let objPage = 0;
+let objMarkers = [''];
+let objNextMarker = '';
 
-const TITLES = { buckets:['Buckets','Object storage browser'], users:['Users','Identity & access keys'], policies:['Policies','IAM policy documents'], catalog:['Metadata Catalog','按对象属性筛选与检查元数据索引'] };
+const TITLES = { buckets:['Buckets','对象浏览 · 元数据筛选'], users:['Users','Identity & access keys'], policies:['Policies','IAM policy documents'] };
 let catalogNextToken = '';
 let catalogLastQuery = null;
+
+const SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
+const SIZE_MULT = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
+function fmtSize(bytes, unit) {
+  let n = Number(bytes) || 0;
+  if (unit && unit !== 'auto') {
+    const m = SIZE_MULT[unit] || 1;
+    return (n / m).toFixed(m > 1 ? 2 : 0) + ' ' + unit;
+  }
+  let i = 0;
+  while (i < SIZE_UNITS.length - 1 && n >= 1024) { n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(2)) + ' ' + SIZE_UNITS[i];
+}
 
 function setStatus(msg, cls) {
   const el = document.getElementById('status');
@@ -451,7 +477,7 @@ async function connect() {
     document.getElementById('sessionUser').textContent = user + (isRoot ? ' · root' : '');
     applyRole();
     loadBuckets();
-    if (isRoot) { loadUsers(); loadPolicies(); loadCatalogBuckets(); loadCatalogStatus(); }
+    if (isRoot) { loadUsers(); loadPolicies(); loadCatalogStatus(); }
   } catch (e) {
     creds = null;
     isRoot = false;
@@ -462,6 +488,8 @@ async function connect() {
 // 普通 IAM 用户只显示对象浏览页；用户/策略管理仅 root 可见（后端也会再次校验）。
 function applyRole() {
   document.querySelectorAll('[data-admin-only]').forEach(el => { el.style.display = isRoot ? '' : 'none'; });
+  // 筛选栏仅 root 可见（元数据搜索依赖 catalog 权限）；每次登录/登出都重置显隐状态
+  document.getElementById('filterPanel').style.display = isRoot ? '' : 'none';
   if (!isRoot) {
     const onAdminTab = document.getElementById('tab-users').classList.contains('active') ||
       document.getElementById('tab-policies').classList.contains('active');
@@ -599,19 +627,35 @@ async function deleteBucket() {
   } catch (e) { setStatus(String(e.message || e), 'err'); }
 }
 
-async function loadObjects() {
+function objLimit() {
+  const v = parseInt(document.getElementById('objLimit').value, 10);
+  return v > 0 ? v : 100;
+}
+
+function updateObjectPager(count, truncated) {
+  document.getElementById('objPrev').style.display = objPage > 0 ? '' : 'none';
+  document.getElementById('objNext').style.display = truncated ? '' : 'none';
+  document.getElementById('objectPageInfo').textContent = '第 ' + (objPage + 1) + ' 页 · ' + count + ' 条';
+}
+
+async function loadObjects(reset) {
   if (!currentBucket) return;
+  if (reset !== false) { objPage = 0; objMarkers = ['']; objNextMarker = ''; }
+  // 浏览模式：隐藏元数据搜索的分页与扫描信息
+  document.getElementById('catalogMore').style.display = 'none';
+  document.getElementById('catalogScan').textContent = '';
   const p = document.getElementById('prefix').value;
-  const d = document.getElementById('delimiter').value;
+  const d = "/";
+  const marker = objMarkers[objPage] || '';
   try {
     const res = await api('GET', '/gos3/admin/buckets/' + encodeURIComponent(currentBucket) +
-      '/objects?prefix=' + encodeURIComponent(p) + '&delimiter=' + encodeURIComponent(d));
+      '/objects?prefix=' + encodeURIComponent(p) + '&delimiter=' + encodeURIComponent(d) +
+      '&marker=' + encodeURIComponent(marker) + '&limit=' + encodeURIComponent(objLimit()));
     const tb = document.getElementById('objectRows');
     tb.innerHTML = '';
     const prefixes = res.prefixes || [], objects = res.objects || [];
     if (!prefixes.length && !objects.length) {
       tb.innerHTML = '<tr><td colspan="5" class="empty">no objects</td></tr>';
-      return;
     }
     prefixes.forEach(pr => {
       const tr = document.createElement('tr');
@@ -619,19 +663,36 @@ async function loadObjects() {
       tr.querySelector('.pfx').onclick = () => { document.getElementById('prefix').value = pr; loadObjects(); };
       tb.appendChild(tr);
     });
-    objects.forEach(o => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = '<td><div class="key">' + ICON_FILE + '<span>' + esc(o.key) + '</span></div></td><td>' + o.size + '</td><td><code>' + esc(String(o.etag).slice(0, 12)) + '</code></td><td class="muted">' + esc(o.modified) + '</td>';
-      const td = document.createElement('td');
-      const box = document.createElement('div'); box.className = 'acts';
-      const dl = document.createElement('button'); dl.className = 'ghost sm'; dl.textContent = 'Download'; dl.onclick = () => downloadObject(o.key);
-      const sh = document.createElement('button'); sh.className = 'ghost sm'; sh.textContent = 'Share'; sh.onclick = () => shareObject(o.key);
-      const del = document.createElement('button'); del.className = 'danger sm'; del.textContent = 'Delete'; del.onclick = () => deleteObject(o.key);
-      box.appendChild(dl); box.appendChild(sh); box.appendChild(del); td.appendChild(box);
-      tr.appendChild(td);
-      tb.appendChild(tr);
-    });
+    objects.forEach(o => tb.appendChild(objectRow(o.key, o.size, o.etag, o.modified)));
+    objNextMarker = res.nextMarker || '';
+    updateObjectPager(prefixes.length + objects.length, !!res.isTruncated);
   } catch (e) { setStatus(String(e.message || e), 'err'); }
+}
+
+function objectRow(key, size, etag, modified) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = '<td><div class="key">' + ICON_FILE + '<span>' + esc(key) + '</span></div></td><td>' + fmtSize(size) + '</td><td><code>' + esc(String(etag || '').slice(0, 12)) + '</code></td><td class="muted">' + esc(modified) + '</td>';
+  const td = document.createElement('td');
+  const box = document.createElement('div'); box.className = 'acts';
+  const dl = document.createElement('button'); dl.className = 'ghost sm'; dl.textContent = 'Download'; dl.onclick = () => downloadObject(key);
+  const sh = document.createElement('button'); sh.className = 'ghost sm'; sh.textContent = 'Share'; sh.onclick = () => shareObject(key);
+  const del = document.createElement('button'); del.className = 'danger sm'; del.textContent = 'Delete'; del.onclick = () => deleteObject(key);
+  box.appendChild(dl); box.appendChild(sh); box.appendChild(del); td.appendChild(box);
+  tr.appendChild(td);
+  return tr;
+}
+
+function loadObjectsNext() {
+  if (!objNextMarker) return;
+  objPage++;
+  objMarkers[objPage] = objNextMarker;
+  loadObjects(false);
+}
+
+function loadObjectsPrev() {
+  if (objPage <= 0) return;
+  objPage--;
+  loadObjects(false);
 }
 
 async function uploadFiles() {
@@ -667,17 +728,6 @@ async function deleteObject(key) {
   } catch (e) { setStatus(String(e.message || e), 'err'); }
 }
 
-async function loadCatalogBuckets() {
-  try {
-    const buckets = await api('GET', '/gos3/admin/buckets');
-    const sel = document.getElementById('catBucket');
-    const current = sel.value;
-    sel.innerHTML = '<option value="">所有 Bucket</option>';
-    (buckets || []).forEach(b => { const o = document.createElement('option'); o.value = b.name; o.textContent = b.name; sel.appendChild(o); });
-    sel.value = current;
-  } catch (e) { setStatus(String(e.message || e), 'err'); }
-}
-
 function catalogMetaQuery(input, prefix, params) {
   const s = input.trim(); if (!s) return;
   const i = s.indexOf('=');
@@ -687,8 +737,17 @@ function catalogMetaQuery(input, prefix, params) {
 
 function catalogSearchParams() {
   const p = new URLSearchParams();
-  const fields = [['catBucket','bucket'],['catPrefix','prefix'],['catContentType','contentType'],['catMinSize','minSize'],['catMaxSize','maxSize']];
-  fields.forEach(([id,key]) => { const v = document.getElementById(id).value.trim(); if (v) p.set(key,v); });
+  if (currentBucket) p.set('bucket', currentBucket);
+  const prefix = document.getElementById('prefix').value.trim(); if (prefix) p.set('prefix', prefix);
+  const ct = document.getElementById('catContentType').value.trim(); if (ct) p.set('contentType', ct);
+  const mult = SIZE_MULT[document.getElementById('catSizeFilterUnit').value] || 1;
+  [['catMinSize','minSize'],['catMaxSize','maxSize']].forEach(([id,key]) => {
+    const v = document.getElementById(id).value.trim();
+    if (!v) return;
+    const n = parseFloat(v);
+    if (!isFinite(n) || n < 0) throw new Error('Size 必须是大于等于 0 的数字');
+    p.set(key, String(Math.round(n * mult)));
+  });
   ['catAfter','catBefore'].forEach((id,i) => { const v = document.getElementById(id).value; if (v) p.set(i ? 'before':'after',new Date(v).toISOString()); });
   if (document.getElementById('catVersions').checked) p.set('versions','true');
   if (document.getElementById('catDeleteMarkers').checked) p.set('deleteMarkers','true');
@@ -698,34 +757,39 @@ function catalogSearchParams() {
   return p;
 }
 
-async function searchCatalog(first) {
+async function searchObjects(first) {
   if (!isRoot) return;
+  if (!currentBucket) { setStatus('先在左侧选择一个 bucket', 'err'); return; }
   try {
-    if (first) { catalogNextToken = ''; catalogLastQuery = catalogSearchParams(); document.getElementById('catalogRows').innerHTML = ''; }
+    if (first) { catalogNextToken = ''; catalogLastQuery = catalogSearchParams(); }
     if (!catalogLastQuery) catalogLastQuery = catalogSearchParams();
     const params = new URLSearchParams(catalogLastQuery);
-    if (catalogNextToken) params.set('token',catalogNextToken);
-    const res = await api('GET','/gos3/admin/catalog/search?' + params.toString());
-    const tbody = document.getElementById('catalogRows');
-    if (!res.docs.length && first) tbody.innerHTML = '<tr><td colspan="7" class="empty">没有匹配对象</td></tr>';
-    (res.docs || []).forEach(d => {
-      const tr = document.createElement('tr');
-      const cells = [d.bucket,d.key,String(d.size),d.contentType || '',d.modTime || '',d.etag || '',Object.entries(d.tags || {}).map(([k,v]) => k + '=' + v).join(', ')];
-      cells.forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
-      tbody.appendChild(tr);
-    });
+    if (catalogNextToken) params.set('token', catalogNextToken);
+    const res = await api('GET', '/gos3/admin/catalog/search?' + params.toString());
+    const tb = document.getElementById('objectRows');
+    if (first) {
+      tb.innerHTML = '';
+      if (!(res.docs || []).length) tb.innerHTML = '<tr><td colspan="5" class="empty">没有匹配对象</td></tr>';
+    }
+    (res.docs || []).forEach(d => tb.appendChild(objectRow(d.key, d.size, d.etag, d.modTime)));
     catalogNextToken = res.nextToken || '';
     document.getElementById('catalogMore').style.display = catalogNextToken ? '' : 'none';
-    document.getElementById('catalogSummary').textContent = res.docs.length + ' rows · generation ' + res.gen;
     document.getElementById('catalogScan').textContent = '扫描模式：' + (res.scan || 'n/a') + ' · 扫描 ' + res.scanned + ' 条';
+    // 搜索模式：隐藏浏览分页
+    document.getElementById('objPrev').style.display = 'none';
+    document.getElementById('objNext').style.display = 'none';
+    document.getElementById('objectPageInfo').textContent = '';
   } catch (e) { setStatus(String(e.message || e), 'err'); }
 }
 
-function resetCatalogFilters() {
-  ['catBucket','catPrefix','catContentType','catMinSize','catMaxSize','catAfter','catBefore','catMeta','catTag'].forEach(id => document.getElementById(id).value = '');
+function resetFilters() {
+  ['catContentType','catMinSize','catMaxSize','catAfter','catBefore','catMeta','catTag'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('catSizeFilterUnit').value = 'B';
   document.getElementById('catVersions').checked = false; document.getElementById('catDeleteMarkers').checked = false;
-  catalogNextToken = ''; catalogLastQuery = null; document.getElementById('catalogRows').innerHTML = '<tr><td colspan="7" class="empty">设置筛选条件后搜索</td></tr>';
-  document.getElementById('catalogSummary').textContent = ''; document.getElementById('catalogScan').textContent = '';
+  catalogNextToken = ''; catalogLastQuery = null;
+  document.getElementById('catalogScan').textContent = '';
+  document.getElementById('catalogMore').style.display = 'none';
+  loadObjects(); // 回到浏览模式
 }
 
 async function loadCatalogStatus() {
@@ -736,7 +800,7 @@ async function loadCatalogStatus() {
 
 async function reindexCatalog() {
   if (!isRoot || !confirm('从对象元数据 sidecar 全量重建索引？')) return;
-  try { await api('POST','/gos3/admin/catalog/reindex'); setStatus('catalog reindex complete','ok'); loadCatalogStatus(); if (catalogLastQuery) searchCatalog(true); }
+  try { await api('POST','/gos3/admin/catalog/reindex'); setStatus('catalog reindex complete','ok'); loadCatalogStatus(); if (catalogLastQuery) searchObjects(true); }
   catch (e) { setStatus(String(e.message || e),'err'); }
 }
 

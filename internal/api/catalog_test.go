@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kxj/gos3/internal/catalog"
+	"github.com/kxj/gos3/internal/store"
 )
 
 type fakeCatalog struct {
@@ -38,6 +39,10 @@ func (f *fakeCatalog) Status() catalog.Status { return f.status }
 func (f *fakeCatalog) Rebuild() error {
 	f.rebuilt = true
 	return f.rebuildErr
+}
+
+func (f *fakeCatalog) List(bucket string, opts store.ListOptions) store.ListObjectsResult {
+	return store.ListObjectsResult{}
 }
 
 func TestAdminCatalogRequiresRoot(t *testing.T) {

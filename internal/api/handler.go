@@ -44,6 +44,8 @@ type CatalogService interface {
 	Stats(catalog.StatsOptions) (catalog.StatsResult, error)
 	Status() catalog.Status
 	Rebuild() error
+	// List 从内存索引列出对象（管理端 bucket 浏览用），语义对齐 store.ListObjects。
+	List(bucket string, opts store.ListOptions) store.ListObjectsResult
 }
 
 type Handler struct {

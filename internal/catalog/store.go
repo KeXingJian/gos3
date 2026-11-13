@@ -171,6 +171,11 @@ func (s *Indexed) Search(f Filter) (SearchResult, error) { return s.eng.Search(f
 // Stats 聚合查询索引。
 func (s *Indexed) Stats(opts StatsOptions) (StatsResult, error) { return s.eng.Stats(opts) }
 
+// List 从内存索引列出对象（管理端 bucket 浏览用），避免暴力遍历 sidecar。
+func (s *Indexed) List(bucket string, opts store.ListOptions) store.ListObjectsResult {
+	return s.eng.List(bucket, opts)
+}
+
 // ---- 覆盖写路径 ----
 
 func (s *Indexed) PutObject(ctx context.Context, bucket, object string, data io.Reader, size int64, contentType string, userMeta map[string]string) (store.ObjectInfo, error) {

@@ -124,14 +124,32 @@ func (h *Handler) serveAdminBuckets(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		q := r.URL.Query()
-		res, err := h.Store.ListObjects(r.Context(), bucket, store.ListOptions{
+		maxKeys := 100
+		if v := q.Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				maxKeys = n
+				if maxKeys > 1000 {
+					maxKeys = 1000
+				}
+			}
+		}
+		opts := store.ListOptions{
 			Prefix:    q.Get("prefix"),
 			Delimiter: q.Get("delimiter"),
-			MaxKeys:   1000,
-		})
-		if err != nil {
-			writeAdminError(w, err)
-			return
+			Marker:    q.Get("marker"),
+			MaxKeys:   maxKeys,
+		}
+		// 优先走内存 LSM 索引（catalog 启用时），否则退回暴力遍历 sidecar。
+		var res store.ListObjectsResult
+		if h.Catalog != nil {
+			res = h.Catalog.List(bucket, opts)
+		} else {
+			var err error
+			res, err = h.Store.ListObjects(r.Context(), bucket, opts)
+			if err != nil {
+				writeAdminError(w, err)
+				return
+			}
 		}
 		type objectView struct {
 			Key      string `json:"key"`
@@ -140,9 +158,11 @@ func (h *Handler) serveAdminBuckets(w http.ResponseWriter, r *http.Request, rest
 			Modified string `json:"modified"`
 		}
 		out := struct {
-			Objects  []objectView `json:"objects"`
-			Prefixes []string     `json:"prefixes"`
-		}{Objects: []objectView{}, Prefixes: res.CommonPrefixes}
+			Objects     []objectView `json:"objects"`
+			Prefixes    []string     `json:"prefixes"`
+			IsTruncated bool         `json:"isTruncated"`
+			NextMarker  string       `json:"nextMarker,omitempty"`
+		}{Objects: []objectView{}, Prefixes: res.CommonPrefixes, IsTruncated: res.IsTruncated, NextMarker: res.NextMarker}
 		for _, o := range res.Objects {
 			out.Objects = append(out.Objects, objectView{Key: o.Name, Size: o.Size, ETag: o.ETag, Modified: o.ModTime.UTC().Format(time.RFC3339)})
 		}

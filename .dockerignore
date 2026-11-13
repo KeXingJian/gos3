@@ -1,7 +1,12 @@
 .git
 .gitignore
+.idea
 gos3
+gos3.exe
 data
+.data
+.node1-data
+.node2-data
 *.test
 *.out
 Dockerfile
